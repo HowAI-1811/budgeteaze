@@ -1,0 +1,122 @@
+{
+  "version": 1,
+  "exportedAt": "2026-04-30T23:05:04.555Z",
+  "categories": [
+    "Credit Cards",
+    "Housing",
+    "Insurance",
+    "Medical",
+    "Misc.",
+    "Transportation",
+    "Utilities"
+  ],
+  "transactions": [
+    {
+      "id": "83f681a8-fc27-4ab8-95c6-4b08545c6315",
+      "description": "Gas",
+      "amount": 235,
+      "category": "Utilities",
+      "type": "debit",
+      "date": "2026-05-01",
+      "isRecurring": true,
+      "recurringId": "54e7245b-3ab2-4f61-9694-b89da95ff2ea",
+      "notes": ""
+    },
+    {
+      "id": "f3416ab4-ddf4-448a-ab27-4c69232cbfe3",
+      "description": "Light",
+      "amount": 83,
+      "category": "Utilities",
+      "type": "debit",
+      "date": "2026-05-01",
+      "isRecurring": false,
+      "notes": ""
+    },
+    {
+      "id": "c5cec48b-4912-426a-aa05-846f996253ee",
+      "description": "Gas",
+      "amount": 235,
+      "category": "Utilities",
+      "type": "debit",
+      "date": "2026-04-01",
+      "isRecurring": true,
+      "recurringId": "54e7245b-3ab2-4f61-9694-b89da95ff2ea",
+      "notes": ""
+    },
+    {
+      "id": "346269bd-0e72-4824-afdc-91e4183c8912",
+      "description": "Car",
+      "amount": 419,
+      "category": "Transportation",
+      "type": "debit",
+      "date": "2026-05-01",
+      "isRecurring": true,
+      "recurringId": "54c10769-6da7-4d05-888f-7312a61e302e",
+      "notes": ""
+    },
+    {
+      "id": "5ddf8b76-044d-41cd-90cc-32f3165c4386",
+      "description": "Credit One",
+      "amount": 150,
+      "category": "Credit Cards",
+      "type": "debit",
+      "date": "2026-05-01",
+      "isRecurring": false,
+      "notes": ""
+    },
+    {
+      "id": "42fc21c4-492a-44ce-b9f1-7537d636109e",
+      "description": "Discover Card",
+      "amount": 150,
+      "category": "Credit Cards",
+      "type": "debit",
+      "date": "2026-05-01",
+      "isRecurring": true,
+      "recurringId": "389e7b1c-a357-4cd4-91a4-b06359d41901",
+      "notes": ""
+    },
+    {
+      "id": "01876e06-1f9d-4080-a193-11d659b0112c",
+      "description": "Chase Slate",
+      "amount": 600,
+      "category": "Credit Cards",
+      "type": "debit",
+      "date": "2026-05-01",
+      "isRecurring": false,
+      "notes": ""
+    },
+    {
+      "id": "f45e39e8-1985-4b59-b991-f3a8e51edf8f",
+      "description": "HSN",
+      "amount": 80,
+      "category": "Credit Cards",
+      "type": "debit",
+      "date": "2026-05-01",
+      "isRecurring": true,
+      "recurringId": "a7414451-5c69-4a63-b8ba-9a78addbc4fa",
+      "notes": ""
+    },
+    {
+      "id": "621320c5-763c-4cfc-a1b1-503dfd9f6790",
+      "description": "Chase Disney",
+      "amount": 400,
+      "category": "Credit Cards",
+      "type": "debit",
+      "date": "2026-05-01",
+      "isRecurring": true,
+      "recurringId": "0abf7d02-33cb-4087-8289-5fbd6eace23f",
+      "notes": ""
+    },
+    {
+      "id": "ba84e949-3d21-4978-92ae-49df570e37c3",
+      "description": "Mortgage",
+      "amount": 1953,
+      "category": "Housing",
+      "type": "debit",
+      "date": "2026-05-01",
+      "isRecurring": true,
+      "recurringId": "f2ba08fa-ee9d-4836-99bb-fba269c898ca",
+      "notes": ""
+    }
+  ]
+}

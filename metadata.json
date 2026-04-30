@@ -1,0 +1,6 @@
+{
+  "name": "BudgetEaze",
+  "description": "A dual-cycle budgeting app designed for bi-monthly payment schedules, helping you balance debits and credits across the 1st and 15th of the month.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
