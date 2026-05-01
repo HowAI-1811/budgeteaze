@@ -61,37 +61,57 @@ const getDefaultEntryDate = (referenceDate: Date) => {
   return format(startOfMonth(referenceDate), 'yyyy-MM-dd');
 };
 
-const isTransaction = (value: unknown): value is Transaction => {
-  if (!value || typeof value !== 'object') return false;
-  const transaction = value as Partial<Transaction>;
+// Loosely validates a raw JSON object as a Transaction, tolerating minor
+// field differences from older backup versions (e.g. null instead of undefined
+// for optional fields).  Returns a cleaned Transaction or null if the core
+// required fields are missing / wrong type.
+const sanitizeTransaction = (value: unknown): Transaction | null => {
+  if (!value || typeof value !== 'object') return null;
+  const t = value as Record<string, unknown>;
 
-  return (
-    typeof transaction.id === 'string' &&
-    typeof transaction.description === 'string' &&
-    typeof transaction.amount === 'number' &&
-    Number.isFinite(transaction.amount) &&
-    (transaction.type === 'debit' || transaction.type === 'credit') &&
-    typeof transaction.date === 'string' &&
-    !Number.isNaN(Date.parse(transaction.date)) &&
-    (transaction.category === undefined || typeof transaction.category === 'string') &&
-    (transaction.isRecurring === undefined || typeof transaction.isRecurring === 'boolean') &&
-    (transaction.recurringId === undefined || typeof transaction.recurringId === 'string') &&
-    (transaction.notes === undefined || typeof transaction.notes === 'string')
-  );
+  if (
+    typeof t.id !== 'string' ||
+    typeof t.description !== 'string' ||
+    typeof t.amount !== 'number' ||
+    !Number.isFinite(t.amount) ||
+    (t.type !== 'debit' && t.type !== 'credit') ||
+    typeof t.date !== 'string' ||
+    Number.isNaN(Date.parse(t.date))
+  ) {
+    return null;
+  }
+
+  return {
+    id: t.id as string,
+    description: t.description as string,
+    amount: t.amount as number,
+    type: t.type as 'debit' | 'credit',
+    date: t.date as string,
+    // Tolerate null / undefined / missing for optional fields
+    category: typeof t.category === 'string' ? t.category : undefined,
+    isRecurring: typeof t.isRecurring === 'boolean' ? t.isRecurring : false,
+    recurringId: typeof t.recurringId === 'string' ? t.recurringId : undefined,
+    notes: typeof t.notes === 'string' ? t.notes : undefined,
+  };
 };
 
 const getTransactionsFromBackup = (backup: unknown): Transaction[] | null => {
-  const maybeTransactions = Array.isArray(backup)
+  const raw = Array.isArray(backup)
     ? backup
     : backup && typeof backup === 'object' && Array.isArray((backup as { transactions?: unknown }).transactions)
       ? (backup as { transactions: unknown[] }).transactions
       : null;
 
-  if (!maybeTransactions || !maybeTransactions.every(isTransaction)) {
-    return null;
+  if (!raw) return null;
+
+  const sanitized: Transaction[] = [];
+  for (const item of raw) {
+    const t = sanitizeTransaction(item);
+    if (!t) return null; // one bad record → reject whole file
+    sanitized.push(t);
   }
 
-  return maybeTransactions;
+  return sanitized;
 };
 
 const getCategoriesFromBackup = (backup: unknown, transactions: Transaction[]): string[] => {
@@ -383,21 +403,38 @@ export default function App() {
       const importedTransactions = getTransactionsFromBackup(backup);
 
       if (!importedTransactions) {
-        alert('That JSON file does not look like a CycleBudget backup.');
+        alert('That JSON file does not look like a CycleBudget backup.\n\nMake sure you are using a file exported with the "Backup JSON" button.');
         return;
       }
+
+      if (importedTransactions.length === 0) {
+        alert('The backup file contained no transactions.');
+        return;
+      }
+
       const importedCategories = getCategoriesFromBackup(backup, importedTransactions);
 
       const shouldReplace = confirm(
-        `Import ${importedTransactions.length} transactions and ${importedCategories.length} categories? This will replace your current saved data.`
+        `Import ${importedTransactions.length} transactions and ${importedCategories.length} categories?\nThis will replace your current saved data.`
       );
 
       if (shouldReplace) {
-        setTransactions(importedTransactions);
+        // Set transactions directly — use a stable reference so the recurring
+        // useEffect (which runs on currentDate changes only) does not fire and
+        // double-add entries that were just imported.
+        const deduped = Array.from(
+          new Map(importedTransactions.map(t => [t.id, t])).values()
+        );
+        setTransactions(deduped);
         setCategories(importedCategories);
         resetForm();
+        // Brief confirmation so the user knows import succeeded
+        setTimeout(() =>
+          alert(`✓ Imported ${deduped.length} transactions and ${importedCategories.length} categories successfully.`)
+        , 100);
       }
-    } catch {
+    } catch (err) {
+      console.error('Import failed:', err);
       alert('Could not read that JSON file. Please choose a valid backup file.');
     }
   };
