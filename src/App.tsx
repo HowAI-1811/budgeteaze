@@ -26,7 +26,9 @@ import {
   Table as TableIcon,
   RefreshCw,
   Download,
-  Upload
+  Upload,
+  CheckCircle2,
+  Circle
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -91,6 +93,7 @@ const sanitizeTransaction = (value: unknown): Transaction | null => {
     category: typeof t.category === 'string' ? t.category : undefined,
     isRecurring: typeof t.isRecurring === 'boolean' ? t.isRecurring : false,
     recurringId: typeof t.recurringId === 'string' ? t.recurringId : undefined,
+    paid: typeof t.paid === 'boolean' ? t.paid : false,
     notes: typeof t.notes === 'string' ? t.notes : undefined,
   };
 };
@@ -147,6 +150,7 @@ export default function App() {
   const [type, setType] = useState<TransactionType>('debit');
   const [date, setDate] = useState(() => getDefaultEntryDate(currentDate));
   const [isRecurring, setIsRecurring] = useState(false);
+  const [paid, setPaid] = useState(false);
   const [updateSeries, setUpdateSeries] = useState(false);
   const [notes, setNotes] = useState('');
   const [newCategory, setNewCategory] = useState('');
@@ -202,7 +206,7 @@ export default function App() {
           new Date(currentDate.getFullYear(), currentDate.getMonth(), dayOfMonth),
           'yyyy-MM-dd'
         );
-        return { ...template, id: crypto.randomUUID(), date: targetDate };
+        return { ...template, id: crypto.randomUUID(), date: targetDate, paid: false };
       });
 
       return [...prev, ...newEntries];
@@ -263,6 +267,7 @@ export default function App() {
       date,
       isRecurring,
       recurringId,
+      paid,
       notes,
     };
 
@@ -302,6 +307,7 @@ export default function App() {
       setDate(getDefaultEntryDate(currentDate));
     }
     setIsRecurring(false);
+    setPaid(false);
     setUpdateSeries(false);
     setNotes('');
     setEditingTransaction(null);
@@ -316,6 +322,12 @@ export default function App() {
     }
   };
 
+  const togglePaid = (id: string) => {
+    setTransactions(prev => prev.map(t => (
+      t.id === id ? { ...t, paid: !t.paid } : t
+    )));
+  };
+
   const editTransaction = (t: Transaction) => {
     setDescription(t.description);
     setAmount(t.amount.toString());
@@ -323,6 +335,7 @@ export default function App() {
     setType(t.type);
     setDate(format(parseISO(t.date), 'yyyy-MM-dd'));
     setIsRecurring(!!t.isRecurring);
+    setPaid(!!t.paid);
     setUpdateSeries(false);
     setNotes(t.notes || '');
     setEditingTransaction(t);
@@ -350,13 +363,14 @@ export default function App() {
   };
 
   const handleExportCSV = () => {
-    const headers = ['Date', 'Description', 'Category', 'Type', 'Amount', 'Recurring', 'Notes'];
+    const headers = ['Date', 'Description', 'Category', 'Type', 'Amount', 'Paid', 'Recurring', 'Notes'];
     const csvRows = monthTransactions.map(t => [
       t.date,
       `"${t.description.replace(/"/g, '""')}"`,
       `"${(t.category || '').replace(/"/g, '""')}"`,
       t.type.toUpperCase(),
       t.amount.toFixed(2),
+      t.paid ? 'Yes' : 'No',
       t.isRecurring ? 'Yes' : 'No',
       `"${(t.notes || '').replace(/"/g, '""')}"`
     ]);
@@ -610,6 +624,7 @@ export default function App() {
               stats={cycles.first} 
               onEdit={editTransaction}
               onDelete={deleteTransaction}
+              onTogglePaid={togglePaid}
               headerBg="bg-slate-900"
               headerText="text-white"
             />
@@ -618,6 +633,7 @@ export default function App() {
               stats={cycles.second} 
               onEdit={editTransaction}
               onDelete={deleteTransaction}
+              onTogglePaid={togglePaid}
               headerBg="bg-slate-100"
               headerText="text-slate-900"
               borderLeft
@@ -875,7 +891,13 @@ export default function App() {
               <label className="text-[9px] uppercase font-bold tracking-wider text-slate-500">Type</label>
               <select 
                 value={type}
-                onChange={(e) => setType(e.target.value as TransactionType)}
+                onChange={(e) => {
+                  const nextType = e.target.value as TransactionType;
+                  setType(nextType);
+                  if (nextType === 'credit') {
+                    setPaid(false);
+                  }
+                }}
                 className="border border-slate-200 p-2 text-xs outline-none focus:bg-blue-50 focus:border-blue-500 rounded bg-white font-mono"
               >
                 <option value="debit">DEBIT (-)</option>
@@ -928,6 +950,22 @@ export default function App() {
             </div>
           </div>
           <div className="flex gap-2">
+            {type === 'debit' && (
+              <button
+                type="button"
+                onClick={() => setPaid(!paid)}
+                className={cn(
+                  "flex items-center gap-2 px-4 border text-[11px] uppercase tracking-widest font-bold py-2.5 rounded transition-colors",
+                  paid
+                    ? "bg-emerald-600 border-emerald-600 text-white hover:bg-emerald-700"
+                    : "bg-white border-slate-200 text-slate-500 hover:bg-slate-50"
+                )}
+                title={paid ? "This bill is marked paid" : "Mark this bill paid"}
+              >
+                {paid ? <CheckCircle2 className="w-3.5 h-3.5" /> : <Circle className="w-3.5 h-3.5" />}
+                Paid
+              </button>
+            )}
             {editingTransaction && (
               <button 
                 type="button" 
@@ -958,6 +996,7 @@ function CyclePane({
   stats, 
   onEdit, 
   onDelete, 
+  onTogglePaid,
   headerBg, 
   headerText,
   borderLeft = false
@@ -966,6 +1005,7 @@ function CyclePane({
   stats: any; 
   onEdit: (t: Transaction) => void;
   onDelete: (id: string, cascade?: boolean) => void;
+  onTogglePaid: (id: string) => void;
   headerBg: string;
   headerText: string;
   borderLeft?: boolean;
@@ -997,6 +1037,7 @@ function CyclePane({
               <th className="p-3 font-normal">Date</th>
               <th className="p-3 font-normal">Description</th>
               <th className="p-3 font-normal">Category</th>
+              <th className="p-3 font-normal">Status</th>
               <th className="p-3 font-normal text-right">Amount</th>
               <th className="p-3 font-normal text-right w-20">Actions</th>
             </tr>
@@ -1004,7 +1045,7 @@ function CyclePane({
           <tbody className="font-mono text-slate-700">
             {stats.transactions.length === 0 ? (
               <tr>
-                <td colSpan={5} className="p-12 text-center text-gray-400 italic font-serif">
+                <td colSpan={6} className="p-12 text-center text-gray-400 italic font-serif">
                   No records found for this period.
                 </td>
               </tr>
@@ -1016,7 +1057,8 @@ function CyclePane({
                   key={t.id} 
                   className={cn(
                     "border-b border-slate-100 group hover:bg-blue-50/50 transition-colors",
-                    t.type === 'credit' && "bg-emerald-50/30"
+                    t.type === 'credit' && "bg-emerald-50/30",
+                    t.type === 'debit' && t.paid && "bg-emerald-50/40"
                   )}
                 >
                   <td className="p-3 border-r border-slate-100 w-16">
@@ -1030,6 +1072,28 @@ function CyclePane({
                   </td>
                   <td className="p-3 border-r border-slate-100 text-slate-500">
                     <span className="truncate block max-w-[100px]">{t.category || '--'}</span>
+                  </td>
+                  <td className="p-3 border-r border-slate-100">
+                    {t.type === 'debit' ? (
+                      <button
+                        type="button"
+                        onClick={() => onTogglePaid(t.id)}
+                        className={cn(
+                          "inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-[9px] font-bold uppercase tracking-wider transition-all",
+                          t.paid
+                            ? "border-emerald-200 bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
+                            : "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100"
+                        )}
+                        title={t.paid ? "Mark this bill unpaid" : "Mark this bill paid"}
+                      >
+                        {t.paid ? <CheckCircle2 className="w-3 h-3" /> : <Circle className="w-3 h-3" />}
+                        {t.paid ? 'Paid' : 'Unpaid'}
+                      </button>
+                    ) : (
+                      <span className="inline-flex items-center rounded-full border border-emerald-100 bg-emerald-50 px-2 py-1 text-[9px] font-bold uppercase tracking-wider text-emerald-700">
+                        Income
+                      </span>
+                    )}
                   </td>
                   <td className={cn(
                     "p-3 text-right border-r border-slate-100",

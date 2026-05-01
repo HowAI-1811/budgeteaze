@@ -9,6 +9,7 @@ export interface Transaction {
   category?: string;
   isRecurring?: boolean;
   recurringId?: string;
+  paid?: boolean;
   notes?: string;
 }
 
