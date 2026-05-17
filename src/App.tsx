@@ -1016,9 +1016,9 @@ function CyclePane({
         <h2 className="text-xs uppercase tracking-[0.3em] font-bold">{title}</h2>
         <div className="flex items-center gap-6">
           <div className="flex flex-col items-end">
-             <span className="text-[8px] uppercase tracking-widest opacity-60 font-bold">Volume</span>
+             <span className="text-[8px] uppercase tracking-widest opacity-60 font-bold">Bills</span>
              <span className="font-mono text-xs opacity-70">
-               ${stats.volume.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+               ${stats.expenses.toLocaleString(undefined, { minimumFractionDigits: 2 })}
              </span>
           </div>
           <div className="flex flex-col items-end">
