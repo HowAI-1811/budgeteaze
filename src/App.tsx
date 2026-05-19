@@ -52,6 +52,83 @@ const STORAGE_KEY = 'cyclebudget_data';
 const CATEGORY_STORAGE_KEY = 'cyclebudget_categories';
 type ViewType = 'ledger' | 'dashboard' | 'recurring' | 'categories';
 
+type TransactionComparison = {
+  previousAmount: number | null;
+  delta: number | null;
+};
+
+type MonthComparison = {
+  previousMonthLabel: string;
+  incomeDelta: number;
+  expensesDelta: number;
+  balanceDelta: number;
+  savingsRateDelta: number | null;
+  transactions: Record<string, TransactionComparison>;
+};
+
+const formatMoney = (value: number) => {
+  return value.toLocaleString(undefined, { minimumFractionDigits: 2 });
+};
+
+const getSavingsRate = (income: number, balance: number) => {
+  return income > 0 ? balance / income : 0;
+};
+
+const normalizeMatchPart = (value?: string) => value?.trim().toLowerCase() || 'uncategorized';
+
+const getTransactionMatchKey = (transaction: Transaction) => {
+  if (transaction.recurringId) {
+    return `recurring:${transaction.recurringId}`;
+  }
+
+  return [
+    'manual',
+    normalizeMatchPart(transaction.description),
+    normalizeMatchPart(transaction.category),
+    transaction.type
+  ].join(':');
+};
+
+const getDeltaTone = (delta: number, type: TransactionType | 'balance' | 'savings') => {
+  if (Math.abs(delta) < 0.005) return 'text-slate-400';
+  if (type === 'debit') return delta > 0 ? 'text-rose-600' : 'text-emerald-600';
+  return delta > 0 ? 'text-emerald-600' : 'text-rose-600';
+};
+
+function MoneyDelta({ delta, toneType, label }: {
+  delta: number | null;
+  toneType: TransactionType | 'balance' | 'savings';
+  label: string;
+}) {
+  if (delta === null) {
+    return <span className="font-mono text-[10px] font-bold text-slate-400">No prior {label}</span>;
+  }
+
+  const isFlat = Math.abs(delta) < 0.005;
+  const prefix = delta > 0 ? '+' : delta < 0 ? '-' : '';
+
+  return (
+    <span className={cn("font-mono text-[10px] font-bold", getDeltaTone(delta, toneType))}>
+      {isFlat ? 'No change' : `${prefix}$${formatMoney(Math.abs(delta))}`} vs {label}
+    </span>
+  );
+}
+
+function PercentDelta({ delta, label }: { delta: number | null; label: string }) {
+  if (delta === null) {
+    return <span className="font-mono text-[10px] font-bold text-slate-400">No prior {label}</span>;
+  }
+
+  const percentagePoints = Math.round(delta * 100);
+  const prefix = percentagePoints > 0 ? '+' : '';
+
+  return (
+    <span className={cn("font-mono text-[10px] font-bold", getDeltaTone(delta, 'savings'))}>
+      {percentagePoints === 0 ? 'No change' : `${prefix}${percentagePoints} pts`} vs {label}
+    </span>
+  );
+}
+
 const getDefaultEntryDate = (referenceDate: Date) => {
   const today = new Date();
   // If we're viewing the current month, default to today's date so entries
@@ -456,6 +533,50 @@ export default function App() {
   const totalIncome = cycles.first.income + cycles.second.income;
   const totalExpenses = cycles.first.expenses + cycles.second.expenses;
   const totalBalance = totalIncome - totalExpenses;
+  const savingsRate = getSavingsRate(totalIncome, totalBalance);
+
+  const monthComparison = useMemo<MonthComparison>(() => {
+    const previousDate = subMonths(currentDate, 1);
+    const previousStart = startOfMonth(previousDate);
+    const previousEnd = endOfMonth(previousDate);
+    const previousMonthTransactions = transactions.filter(t => {
+      const tDate = parseISO(t.date);
+      return isWithinInterval(tDate, { start: previousStart, end: previousEnd });
+    });
+
+    const previousIncome = previousMonthTransactions
+      .filter(t => t.type === 'credit')
+      .reduce((sum, t) => sum + t.amount, 0);
+    const previousExpenses = previousMonthTransactions
+      .filter(t => t.type === 'debit')
+      .reduce((sum, t) => sum + t.amount, 0);
+    const previousBalance = previousIncome - previousExpenses;
+    const previousSavingsRate = getSavingsRate(previousIncome, previousBalance);
+
+    const previousAmountsByKey = previousMonthTransactions.reduce<Record<string, number>>((acc, transaction) => {
+      const key = getTransactionMatchKey(transaction);
+      acc[key] = (acc[key] || 0) + transaction.amount;
+      return acc;
+    }, {});
+
+    const transactionComparisons = monthTransactions.reduce<Record<string, TransactionComparison>>((acc, transaction) => {
+      const previousAmount = previousAmountsByKey[getTransactionMatchKey(transaction)];
+      acc[transaction.id] = {
+        previousAmount: previousAmount ?? null,
+        delta: previousAmount === undefined ? null : transaction.amount - previousAmount,
+      };
+      return acc;
+    }, {});
+
+    return {
+      previousMonthLabel: format(previousDate, 'MMM'),
+      incomeDelta: totalIncome - previousIncome,
+      expensesDelta: totalExpenses - previousExpenses,
+      balanceDelta: totalBalance - previousBalance,
+      savingsRateDelta: previousIncome > 0 || totalIncome > 0 ? savingsRate - previousSavingsRate : null,
+      transactions: transactionComparisons,
+    };
+  }, [currentDate, monthTransactions, transactions, totalIncome, totalExpenses, totalBalance, savingsRate]);
 
   // Dashboard Data Preparation
   const dashboardData = useMemo(() => {
@@ -598,19 +719,35 @@ export default function App() {
 
         <div className="flex gap-8 text-right">
           <div>
+            <p className="text-[9px] uppercase tracking-widest opacity-40 font-bold mb-0.5 text-slate-500">Total Income</p>
+            <p className="font-mono text-lg font-bold text-emerald-600">
+              ${formatMoney(totalIncome)}
+            </p>
+            <MoneyDelta delta={monthComparison.incomeDelta} toneType="credit" label={monthComparison.previousMonthLabel} />
+          </div>
+          <div>
+            <p className="text-[9px] uppercase tracking-widest opacity-40 font-bold mb-0.5 text-slate-500">Total Expenses</p>
+            <p className="font-mono text-lg font-bold text-rose-600">
+              ${formatMoney(totalExpenses)}
+            </p>
+            <MoneyDelta delta={monthComparison.expensesDelta} toneType="debit" label={monthComparison.previousMonthLabel} />
+          </div>
+          <div>
             <p className="text-[9px] uppercase tracking-widest opacity-40 font-bold mb-0.5 text-slate-500">Total Net</p>
             <p className="font-mono text-lg font-bold text-slate-900">
-              ${totalBalance.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+              ${formatMoney(totalBalance)}
             </p>
+            <MoneyDelta delta={monthComparison.balanceDelta} toneType="balance" label={monthComparison.previousMonthLabel} />
           </div>
           <div>
             <p className="text-[9px] uppercase tracking-widest opacity-40 font-bold mb-0.5 text-slate-500">Savings Rate</p>
             <p className={cn(
               "font-mono text-lg font-bold",
-              totalIncome > 0 ? (totalBalance / totalIncome >= 0.2 ? "text-emerald-600" : "text-blue-600") : "text-slate-400"
+              totalIncome > 0 ? (savingsRate >= 0.2 ? "text-emerald-600" : "text-blue-600") : "text-slate-400"
             )}>
-              {totalIncome > 0 ? Math.round((totalBalance / totalIncome) * 100) : 0}%
+              {Math.round(savingsRate * 100)}%
             </p>
+            <PercentDelta delta={monthComparison.savingsRateDelta} label={monthComparison.previousMonthLabel} />
           </div>
         </div>
       </header>
@@ -625,6 +762,7 @@ export default function App() {
               onEdit={editTransaction}
               onDelete={deleteTransaction}
               onTogglePaid={togglePaid}
+              comparison={monthComparison}
               headerBg="bg-slate-900"
               headerText="text-white"
             />
@@ -634,6 +772,7 @@ export default function App() {
               onEdit={editTransaction}
               onDelete={deleteTransaction}
               onTogglePaid={togglePaid}
+              comparison={monthComparison}
               headerBg="bg-slate-100"
               headerText="text-slate-900"
               borderLeft
@@ -997,6 +1136,7 @@ function CyclePane({
   onEdit, 
   onDelete, 
   onTogglePaid,
+  comparison,
   headerBg, 
   headerText,
   borderLeft = false
@@ -1006,6 +1146,7 @@ function CyclePane({
   onEdit: (t: Transaction) => void;
   onDelete: (id: string, cascade?: boolean) => void;
   onTogglePaid: (id: string) => void;
+  comparison: MonthComparison;
   headerBg: string;
   headerText: string;
   borderLeft?: boolean;
@@ -1018,13 +1159,13 @@ function CyclePane({
           <div className="flex flex-col items-end">
              <span className="text-[8px] uppercase tracking-widest opacity-60 font-bold">Bills</span>
              <span className="font-mono text-xs opacity-70">
-               ${stats.expenses.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+               ${formatMoney(stats.expenses)}
              </span>
           </div>
           <div className="flex flex-col items-end">
              <span className="text-[8px] uppercase tracking-widest opacity-60 font-bold">Delta</span>
              <span className="font-mono text-sm font-bold">
-               ${stats.balance.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+               ${formatMoney(stats.balance)}
              </span>
           </div>
         </div>
@@ -1052,87 +1193,103 @@ function CyclePane({
             ) : (
               stats.transactions
                 .sort((a: any, b: any) => parseISO(a.date).getTime() - parseISO(b.date).getTime())
-                .map((t: Transaction) => (
-                <tr 
-                  key={t.id} 
-                  className={cn(
-                    "border-b border-slate-100 group hover:bg-blue-50/50 transition-colors",
-                    t.type === 'credit' && "bg-emerald-50/30",
-                    t.type === 'debit' && t.paid && "bg-emerald-50/40"
-                  )}
-                >
-                  <td className="p-3 border-r border-slate-100 w-16">
-                    <div className="flex items-center gap-1">
-                      {t.isRecurring && <RefreshCw className="w-2.5 h-2.5 text-blue-500 shrink-0" />}
-                      {format(parseISO(t.date), 'MM-dd')}
-                    </div>
-                  </td>
-                  <td className="p-3 border-r border-slate-100 text-slate-800 font-medium">
-                    <span className="truncate block max-w-[150px]">{t.description}</span>
-                  </td>
-                  <td className="p-3 border-r border-slate-100 text-slate-500">
-                    <span className="truncate block max-w-[100px]">{t.category || '--'}</span>
-                  </td>
-                  <td className="p-3 border-r border-slate-100">
-                    {t.type === 'debit' ? (
-                      <button
-                        type="button"
-                        onClick={() => onTogglePaid(t.id)}
-                        className={cn(
-                          "inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-[9px] font-bold uppercase tracking-wider transition-all",
-                          t.paid
-                            ? "border-emerald-200 bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
-                            : "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100"
-                        )}
-                        title={t.paid ? "Mark this bill unpaid" : "Mark this bill paid"}
-                      >
-                        {t.paid ? <CheckCircle2 className="w-3 h-3" /> : <Circle className="w-3 h-3" />}
-                        {t.paid ? 'Paid' : 'Unpaid'}
-                      </button>
-                    ) : (
-                      <span className="inline-flex items-center rounded-full border border-emerald-100 bg-emerald-50 px-2 py-1 text-[9px] font-bold uppercase tracking-wider text-emerald-700">
-                        Income
-                      </span>
-                    )}
-                  </td>
-                  <td className={cn(
-                    "p-3 text-right border-r border-slate-100",
-                    t.type === 'credit' ? "text-emerald-600 font-bold" : "text-slate-900"
-                  )}>
-                    {t.type === 'credit' ? '+' : '-'}{t.amount.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                  </td>
-                  <td className="p-3 text-right">
-                    <div className="flex justify-end gap-1 opacity-10 group-hover:opacity-100 transition-opacity">
-                      <button 
-                        onClick={() => onEdit(t)}
-                        className="p-1 hover:text-blue-600 transition-colors"
-                      >
-                        <Edit2 className="w-3.5 h-3.5" />
-                      </button>
-                      <button 
-                        onClick={() => onDelete(t.id)}
-                        className="p-1 hover:text-rose-600 transition-colors"
-                        title="Delete instance"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                      {t.isRecurring && (
-                        <button 
-                          onClick={() => {
-                             if(confirm('Delete entire recurring series? (All historical and future entries for this item will be removed)')) {
-                               onDelete(t.id, true);
-                             }
-                          }}
-                          className="p-1 hover:text-rose-900 transition-colors"
-                          title="Delete entire series"
-                        >
-                          <RefreshCw className="w-3.5 h-3.5" />
-                        </button>
+                .map((t: Transaction) => {
+                  const itemComparison = comparison.transactions[t.id];
+                  return (
+                    <tr
+                      key={t.id}
+                      className={cn(
+                        "border-b border-slate-100 group hover:bg-blue-50/50 transition-colors",
+                        t.type === 'credit' && "bg-emerald-50/30",
+                        t.type === 'debit' && t.paid && "bg-emerald-50/40"
                       )}
-                    </div>
-                  </td>
-                </tr>
-              ))
+                    >
+                      <td className="p-3 border-r border-slate-100 w-16">
+                        <div className="flex items-center gap-1">
+                          {t.isRecurring && <RefreshCw className="w-2.5 h-2.5 text-blue-500 shrink-0" />}
+                          {format(parseISO(t.date), 'MM-dd')}
+                        </div>
+                      </td>
+                      <td className="p-3 border-r border-slate-100 text-slate-800 font-medium">
+                        <span className="truncate block max-w-[150px]">{t.description}</span>
+                      </td>
+                      <td className="p-3 border-r border-slate-100 text-slate-500">
+                        <span className="truncate block max-w-[100px]">{t.category || '--'}</span>
+                      </td>
+                      <td className="p-3 border-r border-slate-100">
+                        {t.type === 'debit' ? (
+                          <button
+                            type="button"
+                            onClick={() => onTogglePaid(t.id)}
+                            className={cn(
+                              "inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-[9px] font-bold uppercase tracking-wider transition-all",
+                              t.paid
+                                ? "border-emerald-200 bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
+                                : "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100"
+                            )}
+                            title={t.paid ? "Mark this bill unpaid" : "Mark this bill paid"}
+                          >
+                            {t.paid ? <CheckCircle2 className="w-3 h-3" /> : <Circle className="w-3 h-3" />}
+                            {t.paid ? 'Paid' : 'Unpaid'}
+                          </button>
+                        ) : (
+                          <span className="inline-flex items-center rounded-full border border-emerald-100 bg-emerald-50 px-2 py-1 text-[9px] font-bold uppercase tracking-wider text-emerald-700">
+                            Income
+                          </span>
+                        )}
+                      </td>
+                      <td className={cn(
+                        "p-3 text-right border-r border-slate-100",
+                        t.type === 'credit' ? "text-emerald-600 font-bold" : "text-slate-900"
+                      )}>
+                        <div className="flex flex-col items-end gap-0.5">
+                          <span>{t.type === 'credit' ? '+' : '-'}{formatMoney(t.amount)}</span>
+                          {itemComparison?.delta === null ? (
+                            <span className="font-sans text-[9px] font-bold uppercase tracking-wider text-slate-400">
+                              New vs {comparison.previousMonthLabel}
+                            </span>
+                          ) : itemComparison ? (
+                            <MoneyDelta
+                              delta={itemComparison.delta}
+                              toneType={t.type}
+                              label={comparison.previousMonthLabel}
+                            />
+                          ) : null}
+                        </div>
+                      </td>
+                      <td className="p-3 text-right">
+                        <div className="flex justify-end gap-1 opacity-10 group-hover:opacity-100 transition-opacity">
+                          <button
+                            onClick={() => onEdit(t)}
+                            className="p-1 hover:text-blue-600 transition-colors"
+                          >
+                            <Edit2 className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onClick={() => onDelete(t.id)}
+                            className="p-1 hover:text-rose-600 transition-colors"
+                            title="Delete instance"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                          {t.isRecurring && (
+                            <button
+                              onClick={() => {
+                                if(confirm('Delete entire recurring series? (All historical and future entries for this item will be removed)')) {
+                                  onDelete(t.id, true);
+                                }
+                              }}
+                              className="p-1 hover:text-rose-900 transition-colors"
+                              title="Delete entire series"
+                            >
+                              <RefreshCw className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
             )}
           </tbody>
         </table>
