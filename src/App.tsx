@@ -617,10 +617,10 @@ export default function App() {
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-slate-50">
       {/* Header Section */}
-      <header className="border-b border-slate-200 px-8 py-4 flex justify-between items-center bg-white shrink-0 shadow-sm z-10">
-        <div className="flex flex-col">
-          <div className="flex items-center gap-6">
-            <h1 className="font-serif italic text-2xl tracking-tight text-slate-900">Split-Cycle Ledger</h1>
+      <header className="border-b border-slate-200 px-5 py-3 flex flex-wrap justify-between items-start gap-4 bg-white shrink-0 shadow-sm z-10">
+        <div className="flex flex-col min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-3">
+            <h1 className="font-serif italic text-2xl tracking-tight text-slate-900 shrink-0">Split-Cycle Ledger</h1>
             
             <nav className="flex items-center bg-slate-100 p-1 rounded-lg">
               <button 
@@ -665,8 +665,8 @@ export default function App() {
               </button>
             </nav>
 
-            <div className="flex items-center gap-1 ml-4 border border-slate-200 rounded p-0.5 bg-slate-50">
-              <button 
+            <div className="flex items-center gap-1 border border-slate-200 rounded p-0.5 bg-slate-50 shrink-0">
+              <button
                 onClick={() => setCurrentDate(subMonths(currentDate, 1))}
                 className="p-1 hover:bg-slate-200 transition-colors rounded"
               >
@@ -675,7 +675,7 @@ export default function App() {
               <span className="font-mono text-xs font-bold px-3 uppercase tracking-tighter w-24 text-center">
                 {format(currentDate, 'MMM yyyy')}
               </span>
-              <button 
+              <button
                 onClick={() => setCurrentDate(addMonths(currentDate, 1))}
                 className="p-1 hover:bg-slate-200 transition-colors rounded"
               >
@@ -683,30 +683,32 @@ export default function App() {
               </button>
             </div>
 
-            <button 
-              onClick={handleExportCSV}
-              className="flex items-center gap-2 px-3 py-1.5 border border-slate-200 rounded-md text-[10px] font-bold uppercase tracking-wider text-slate-600 hover:bg-slate-50 hover:text-blue-600 transition-all ml-2"
-              title="Export Month as CSV"
-            >
-              <Download className="w-3.5 h-3.5" />
-              Export CSV
-            </button>
-            <button 
-              onClick={handleExportJSON}
-              className="flex items-center gap-2 px-3 py-1.5 border border-slate-200 rounded-md text-[10px] font-bold uppercase tracking-wider text-slate-600 hover:bg-slate-50 hover:text-blue-600 transition-all"
-              title="Export All Data as JSON Backup"
-            >
-              <Download className="w-3.5 h-3.5" />
-              Backup JSON
-            </button>
-            <button 
-              onClick={() => importInputRef.current?.click()}
-              className="flex items-center gap-2 px-3 py-1.5 border border-slate-200 rounded-md text-[10px] font-bold uppercase tracking-wider text-slate-600 hover:bg-slate-50 hover:text-blue-600 transition-all"
-              title="Import JSON Backup"
-            >
-              <Upload className="w-3.5 h-3.5" />
-              Import JSON
-            </button>
+            <div className="grid w-28 shrink-0 grid-cols-1 gap-1">
+              <button
+                onClick={handleExportCSV}
+                className="flex items-center gap-2 px-2 py-1 border border-slate-200 rounded-md text-[9px] font-bold uppercase tracking-wider text-slate-600 hover:bg-slate-50 hover:text-blue-600 transition-all"
+                title="Export Month as CSV"
+              >
+                <Download className="w-3 h-3 shrink-0" />
+                CSV
+              </button>
+              <button
+                onClick={handleExportJSON}
+                className="flex items-center gap-2 px-2 py-1 border border-slate-200 rounded-md text-[9px] font-bold uppercase tracking-wider text-slate-600 hover:bg-slate-50 hover:text-blue-600 transition-all"
+                title="Export All Data as JSON Backup"
+              >
+                <Download className="w-3 h-3 shrink-0" />
+                Backup
+              </button>
+              <button
+                onClick={() => importInputRef.current?.click()}
+                className="flex items-center gap-2 px-2 py-1 border border-slate-200 rounded-md text-[9px] font-bold uppercase tracking-wider text-slate-600 hover:bg-slate-50 hover:text-blue-600 transition-all"
+                title="Import JSON Backup"
+              >
+                <Upload className="w-3 h-3 shrink-0" />
+                Import
+              </button>
+            </div>
             <input
               ref={importInputRef}
               type="file"
@@ -717,24 +719,24 @@ export default function App() {
           </div>
         </div>
 
-        <div className="flex gap-8 text-right">
+        <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-right shrink-0">
           <div>
             <p className="text-[9px] uppercase tracking-widest opacity-40 font-bold mb-0.5 text-slate-500">Total Income</p>
-            <p className="font-mono text-lg font-bold text-emerald-600">
+            <p className="font-mono text-base font-bold text-emerald-600">
               ${formatMoney(totalIncome)}
             </p>
             <MoneyDelta delta={monthComparison.incomeDelta} toneType="credit" label={monthComparison.previousMonthLabel} />
           </div>
           <div>
             <p className="text-[9px] uppercase tracking-widest opacity-40 font-bold mb-0.5 text-slate-500">Total Expenses</p>
-            <p className="font-mono text-lg font-bold text-rose-600">
+            <p className="font-mono text-base font-bold text-rose-600">
               ${formatMoney(totalExpenses)}
             </p>
             <MoneyDelta delta={monthComparison.expensesDelta} toneType="debit" label={monthComparison.previousMonthLabel} />
           </div>
           <div>
             <p className="text-[9px] uppercase tracking-widest opacity-40 font-bold mb-0.5 text-slate-500">Total Net</p>
-            <p className="font-mono text-lg font-bold text-slate-900">
+            <p className="font-mono text-base font-bold text-slate-900">
               ${formatMoney(totalBalance)}
             </p>
             <MoneyDelta delta={monthComparison.balanceDelta} toneType="balance" label={monthComparison.previousMonthLabel} />
@@ -742,7 +744,7 @@ export default function App() {
           <div>
             <p className="text-[9px] uppercase tracking-widest opacity-40 font-bold mb-0.5 text-slate-500">Savings Rate</p>
             <p className={cn(
-              "font-mono text-lg font-bold",
+              "font-mono text-base font-bold",
               totalIncome > 0 ? (savingsRate >= 0.2 ? "text-emerald-600" : "text-blue-600") : "text-slate-400"
             )}>
               {Math.round(savingsRate * 100)}%
