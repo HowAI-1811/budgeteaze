@@ -28,7 +28,8 @@ import {
   Download,
   Upload,
   CheckCircle2,
-  Circle
+  Circle,
+  CreditCard
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -50,7 +51,7 @@ import { Transaction, TransactionType } from './types';
 
 const STORAGE_KEY = 'cyclebudget_data';
 const CATEGORY_STORAGE_KEY = 'cyclebudget_categories';
-type ViewType = 'ledger' | 'dashboard' | 'recurring' | 'categories';
+type ViewType = 'ledger' | 'dashboard' | 'creditCards' | 'recurring' | 'categories';
 
 type TransactionComparison = {
   previousAmount: number | null;
@@ -66,6 +67,21 @@ type MonthComparison = {
   transactions: Record<string, TransactionComparison>;
 };
 
+type CreditCardSummary = {
+  key: string;
+  accountName: string;
+  currentBalance: number;
+  statementBalance: number;
+  minimumPayment: number;
+  plannedPayment: number;
+  dueDate?: string;
+  creditLimit?: number;
+  interestRate?: number;
+  utilization: number | null;
+  paid: boolean;
+  transaction: Transaction;
+};
+
 const formatMoney = (value: number) => {
   return value.toLocaleString(undefined, { minimumFractionDigits: 2 });
 };
@@ -74,7 +90,19 @@ const getSavingsRate = (income: number, balance: number) => {
   return income > 0 ? balance / income : 0;
 };
 
+const getOptionalNumber = (value: unknown) => {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+};
+
+const parseOptionalNumberInput = (value: string) => {
+  if (!value.trim()) return undefined;
+  const parsed = parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+};
+
 const normalizeMatchPart = (value?: string) => value?.trim().toLowerCase() || 'uncategorized';
+
+const isCreditCardTransaction = (transaction: Transaction) => transaction.accountType === 'credit_card';
 
 const getTransactionMatchKey = (transaction: Transaction) => {
   if (transaction.recurringId) {
@@ -129,6 +157,21 @@ function PercentDelta({ delta, label }: { delta: number | null; label: string })
   );
 }
 
+function PaymentPosture({ amount, minimumPayment }: { amount: number; minimumPayment?: number }) {
+  if (!minimumPayment || minimumPayment <= 0) return null;
+
+  const difference = amount - minimumPayment;
+  if (Math.abs(difference) < 0.005) {
+    return <span className="text-slate-400">Minimum only</span>;
+  }
+
+  return (
+    <span className={difference > 0 ? 'text-emerald-600' : 'text-rose-600'}>
+      {difference > 0 ? 'Above minimum' : 'Below minimum'}
+    </span>
+  );
+}
+
 const getDefaultEntryDate = (referenceDate: Date) => {
   const today = new Date();
   // If we're viewing the current month, default to today's date so entries
@@ -172,6 +215,15 @@ const sanitizeTransaction = (value: unknown): Transaction | null => {
     recurringId: typeof t.recurringId === 'string' ? t.recurringId : undefined,
     paid: typeof t.paid === 'boolean' ? t.paid : false,
     notes: typeof t.notes === 'string' ? t.notes : undefined,
+    accountType: t.accountType === 'credit_card' ? 'credit_card' : undefined,
+    accountName: typeof t.accountName === 'string' ? t.accountName : undefined,
+    statementBalance: getOptionalNumber(t.statementBalance),
+    currentBalance: getOptionalNumber(t.currentBalance),
+    minimumPayment: getOptionalNumber(t.minimumPayment),
+    dueDate: typeof t.dueDate === 'string' && !Number.isNaN(Date.parse(t.dueDate)) ? t.dueDate : undefined,
+    creditLimit: getOptionalNumber(t.creditLimit),
+    interestRate: getOptionalNumber(t.interestRate),
+    lastStatementDate: typeof t.lastStatementDate === 'string' && !Number.isNaN(Date.parse(t.lastStatementDate)) ? t.lastStatementDate : undefined,
   };
 };
 
@@ -231,6 +283,15 @@ export default function App() {
   const [updateSeries, setUpdateSeries] = useState(false);
   const [notes, setNotes] = useState('');
   const [newCategory, setNewCategory] = useState('');
+  const [isCreditCard, setIsCreditCard] = useState(false);
+  const [accountName, setAccountName] = useState('');
+  const [statementBalance, setStatementBalance] = useState('');
+  const [currentBalance, setCurrentBalance] = useState('');
+  const [minimumPayment, setMinimumPayment] = useState('');
+  const [dueDate, setDueDate] = useState('');
+  const [creditLimit, setCreditLimit] = useState('');
+  const [interestRate, setInterestRate] = useState('');
+  const [lastStatementDate, setLastStatementDate] = useState('');
   const importInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -334,6 +395,7 @@ export default function App() {
     if (!description || !amount) return;
 
     const recurringId = editingTransaction?.recurringId || (isRecurring ? crypto.randomUUID() : undefined);
+    const trimmedAccountName = accountName.trim();
 
     const newTransaction: Transaction = {
       id: editingTransaction?.id || crypto.randomUUID(),
@@ -346,6 +408,15 @@ export default function App() {
       recurringId,
       paid,
       notes,
+      accountType: isCreditCard ? 'credit_card' : undefined,
+      accountName: isCreditCard ? trimmedAccountName || description : undefined,
+      statementBalance: isCreditCard ? parseOptionalNumberInput(statementBalance) : undefined,
+      currentBalance: isCreditCard ? parseOptionalNumberInput(currentBalance) : undefined,
+      minimumPayment: isCreditCard ? parseOptionalNumberInput(minimumPayment) : undefined,
+      dueDate: isCreditCard && dueDate ? dueDate : undefined,
+      creditLimit: isCreditCard ? parseOptionalNumberInput(creditLimit) : undefined,
+      interestRate: isCreditCard ? parseOptionalNumberInput(interestRate) : undefined,
+      lastStatementDate: isCreditCard && lastStatementDate ? lastStatementDate : undefined,
     };
 
     if (editingTransaction) {
@@ -360,7 +431,16 @@ export default function App() {
               category,
               type,
               notes,
-              isRecurring: true // Keep it recurring
+              isRecurring: true, // Keep it recurring
+              accountType: isCreditCard ? 'credit_card' : undefined,
+              accountName: isCreditCard ? trimmedAccountName || description : undefined,
+              statementBalance: isCreditCard ? parseOptionalNumberInput(statementBalance) : undefined,
+              currentBalance: isCreditCard ? parseOptionalNumberInput(currentBalance) : undefined,
+              minimumPayment: isCreditCard ? parseOptionalNumberInput(minimumPayment) : undefined,
+              dueDate: isCreditCard && dueDate ? dueDate : undefined,
+              creditLimit: isCreditCard ? parseOptionalNumberInput(creditLimit) : undefined,
+              interestRate: isCreditCard ? parseOptionalNumberInput(interestRate) : undefined,
+              lastStatementDate: isCreditCard && lastStatementDate ? lastStatementDate : undefined,
             };
           }
           return t;
@@ -387,6 +467,15 @@ export default function App() {
     setPaid(false);
     setUpdateSeries(false);
     setNotes('');
+    setIsCreditCard(false);
+    setAccountName('');
+    setStatementBalance('');
+    setCurrentBalance('');
+    setMinimumPayment('');
+    setDueDate('');
+    setCreditLimit('');
+    setInterestRate('');
+    setLastStatementDate('');
     setEditingTransaction(null);
   };
 
@@ -415,6 +504,15 @@ export default function App() {
     setPaid(!!t.paid);
     setUpdateSeries(false);
     setNotes(t.notes || '');
+    setIsCreditCard(isCreditCardTransaction(t));
+    setAccountName(t.accountName || '');
+    setStatementBalance(t.statementBalance?.toString() || '');
+    setCurrentBalance(t.currentBalance?.toString() || '');
+    setMinimumPayment(t.minimumPayment?.toString() || '');
+    setDueDate(t.dueDate || '');
+    setCreditLimit(t.creditLimit?.toString() || '');
+    setInterestRate(t.interestRate?.toString() || '');
+    setLastStatementDate(t.lastStatementDate || '');
     setEditingTransaction(t);
   };
 
@@ -440,7 +538,25 @@ export default function App() {
   };
 
   const handleExportCSV = () => {
-    const headers = ['Date', 'Description', 'Category', 'Type', 'Amount', 'Paid', 'Recurring', 'Notes'];
+    const headers = [
+      'Date',
+      'Description',
+      'Category',
+      'Type',
+      'Amount',
+      'Paid',
+      'Recurring',
+      'Account Type',
+      'Account Name',
+      'Current Balance',
+      'Statement Balance',
+      'Minimum Payment',
+      'Due Date',
+      'Credit Limit',
+      'APR',
+      'Last Statement Date',
+      'Notes'
+    ];
     const csvRows = monthTransactions.map(t => [
       t.date,
       `"${t.description.replace(/"/g, '""')}"`,
@@ -449,6 +565,15 @@ export default function App() {
       t.amount.toFixed(2),
       t.paid ? 'Yes' : 'No',
       t.isRecurring ? 'Yes' : 'No',
+      t.accountType || '',
+      `"${(t.accountName || '').replace(/"/g, '""')}"`,
+      t.currentBalance?.toFixed(2) || '',
+      t.statementBalance?.toFixed(2) || '',
+      t.minimumPayment?.toFixed(2) || '',
+      t.dueDate || '',
+      t.creditLimit?.toFixed(2) || '',
+      t.interestRate?.toFixed(2) || '',
+      t.lastStatementDate || '',
       `"${(t.notes || '').replace(/"/g, '""')}"`
     ]);
 
@@ -578,6 +703,44 @@ export default function App() {
     };
   }, [currentDate, monthTransactions, transactions, totalIncome, totalExpenses, totalBalance, savingsRate]);
 
+  const creditCardSummaries = useMemo<CreditCardSummary[]>(() => {
+    const latestByAccount = new Map<string, CreditCardSummary>();
+
+    monthTransactions
+      .filter(isCreditCardTransaction)
+      .sort((a, b) => parseISO(a.date).getTime() - parseISO(b.date).getTime())
+      .forEach(transaction => {
+        const accountName = transaction.accountName?.trim() || transaction.description;
+        const key = accountName.toLowerCase();
+        const currentBalance = transaction.currentBalance || 0;
+        const creditLimit = transaction.creditLimit;
+        const existing = latestByAccount.get(key);
+        const plannedPayment = (existing?.plannedPayment || 0) + transaction.amount;
+
+        latestByAccount.set(key, {
+          key,
+          accountName,
+          currentBalance,
+          statementBalance: transaction.statementBalance || 0,
+          minimumPayment: transaction.minimumPayment || 0,
+          plannedPayment,
+          dueDate: transaction.dueDate,
+          creditLimit,
+          interestRate: transaction.interestRate,
+          utilization: creditLimit && creditLimit > 0 ? currentBalance / creditLimit : null,
+          paid: !!transaction.paid,
+          transaction,
+        });
+      });
+
+    return Array.from(latestByAccount.values()).sort((a, b) => {
+      if (!a.dueDate && !b.dueDate) return a.accountName.localeCompare(b.accountName);
+      if (!a.dueDate) return 1;
+      if (!b.dueDate) return -1;
+      return parseISO(a.dueDate).getTime() - parseISO(b.dueDate).getTime();
+    });
+  }, [monthTransactions]);
+
   // Dashboard Data Preparation
   const dashboardData = useMemo(() => {
     const categoryMap: Record<string, number> = {};
@@ -642,6 +805,16 @@ export default function App() {
               >
                 <LayoutDashboard className="w-3.5 h-3.5" />
                 Dashboard
+              </button>
+              <button
+                onClick={() => setActiveView('creditCards')}
+                className={cn(
+                  "flex items-center gap-2 px-4 py-1.5 rounded-md text-[11px] font-bold uppercase tracking-wider transition-all",
+                  activeView === 'creditCards' ? "bg-white text-blue-600 shadow-sm" : "text-slate-500 hover:text-slate-900"
+                )}
+              >
+                <CreditCard className="w-3.5 h-3.5" />
+                Cards
               </button>
               <button 
                 onClick={() => setActiveView('recurring')}
@@ -858,6 +1031,15 @@ export default function App() {
               </div>
             </div>
           </div>
+        ) : activeView === 'creditCards' ? (
+          <CreditCardsView
+            summaries={creditCardSummaries}
+            onEdit={(transaction) => {
+              setActiveView('ledger');
+              editTransaction(transaction);
+            }}
+            onTogglePaid={togglePaid}
+          />
         ) : activeView === 'recurring' ? (
           <div className="h-full overflow-y-auto p-8 animate-in slide-in-from-right duration-500">
              <div className="max-w-4xl mx-auto space-y-6">
@@ -988,9 +1170,10 @@ export default function App() {
       </main>
 
       {/* Entry Control Panel */}
-      <footer className="border-t border-slate-200 p-6 bg-white shrink-0">
-        <form onSubmit={handleAddOrUpdate} className="flex items-end gap-6 max-w-7xl mx-auto">
-          <div className="flex-1 grid grid-cols-7 gap-4">
+      <footer className="border-t border-slate-200 p-5 bg-white shrink-0">
+        <form onSubmit={handleAddOrUpdate} className="flex flex-col gap-3 max-w-7xl mx-auto">
+          <div className="flex items-end gap-5">
+          <div className="flex-1 grid grid-cols-8 gap-3">
             <div className="flex flex-col gap-1">
               <label className="text-[9px] uppercase font-bold tracking-wider text-slate-500">Date</label>
               <input 
@@ -1056,6 +1239,29 @@ export default function App() {
                 className="border border-slate-200 p-2 text-xs font-mono outline-none focus:bg-blue-50 focus:border-blue-500 rounded transition-all"
                 placeholder="0.00"
               />
+            </div>
+            <div className="flex flex-col justify-center items-center gap-1 pb-1">
+              <label className="text-[9px] uppercase font-bold tracking-wider text-slate-500 mb-1">Card?</label>
+              <button
+                type="button"
+                onClick={() => {
+                  const nextIsCreditCard = !isCreditCard;
+                  setIsCreditCard(nextIsCreditCard);
+                  if (nextIsCreditCard) {
+                    setType('debit');
+                    if (!accountName) {
+                      setAccountName(description);
+                    }
+                  }
+                }}
+                className={cn(
+                  "p-2 rounded-md border transition-all",
+                  isCreditCard ? "bg-slate-900 border-slate-900 text-white" : "border-slate-200 text-slate-300 hover:border-slate-300"
+                )}
+                title={isCreditCard ? "Credit card details enabled" : "Track credit card details"}
+              >
+                <CreditCard className="w-4 h-4" />
+              </button>
             </div>
             <div className="flex flex-col justify-center items-center gap-1 pb-1">
               <label className="text-[9px] uppercase font-bold tracking-wider text-slate-500 mb-1">
@@ -1126,8 +1332,226 @@ export default function App() {
               {editingTransaction ? 'Update Entry' : 'Commit Entry'}
             </button>
           </div>
+          </div>
+          {isCreditCard && (
+            <div className="grid grid-cols-8 gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+              <div className="flex flex-col gap-1 col-span-2">
+                <label className="text-[9px] uppercase font-bold tracking-wider text-slate-500">Card Name</label>
+                <input
+                  type="text"
+                  value={accountName}
+                  onChange={(e) => setAccountName(e.target.value)}
+                  className="border border-slate-200 p-2 text-xs outline-none focus:bg-blue-50 focus:border-blue-500 rounded transition-all"
+                  placeholder="Chase Freedom"
+                />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-[9px] uppercase font-bold tracking-wider text-slate-500">Current Balance</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={currentBalance}
+                  onChange={(e) => setCurrentBalance(e.target.value)}
+                  className="border border-slate-200 p-2 text-xs font-mono outline-none focus:bg-blue-50 focus:border-blue-500 rounded transition-all"
+                  placeholder="0.00"
+                />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-[9px] uppercase font-bold tracking-wider text-slate-500">Statement</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={statementBalance}
+                  onChange={(e) => setStatementBalance(e.target.value)}
+                  className="border border-slate-200 p-2 text-xs font-mono outline-none focus:bg-blue-50 focus:border-blue-500 rounded transition-all"
+                  placeholder="0.00"
+                />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-[9px] uppercase font-bold tracking-wider text-slate-500">Minimum</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={minimumPayment}
+                  onChange={(e) => setMinimumPayment(e.target.value)}
+                  className="border border-slate-200 p-2 text-xs font-mono outline-none focus:bg-blue-50 focus:border-blue-500 rounded transition-all"
+                  placeholder="0.00"
+                />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-[9px] uppercase font-bold tracking-wider text-slate-500">Due Date</label>
+                <input
+                  type="date"
+                  value={dueDate}
+                  onChange={(e) => setDueDate(e.target.value)}
+                  className="border border-slate-200 p-2 text-xs font-mono outline-none focus:bg-blue-50 focus:border-blue-500 rounded transition-all"
+                />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-[9px] uppercase font-bold tracking-wider text-slate-500">Limit</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={creditLimit}
+                  onChange={(e) => setCreditLimit(e.target.value)}
+                  className="border border-slate-200 p-2 text-xs font-mono outline-none focus:bg-blue-50 focus:border-blue-500 rounded transition-all"
+                  placeholder="0.00"
+                />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-[9px] uppercase font-bold tracking-wider text-slate-500">APR %</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={interestRate}
+                  onChange={(e) => setInterestRate(e.target.value)}
+                  className="border border-slate-200 p-2 text-xs font-mono outline-none focus:bg-blue-50 focus:border-blue-500 rounded transition-all"
+                  placeholder="0.00"
+                />
+              </div>
+            </div>
+          )}
         </form>
       </footer>
+    </div>
+  );
+}
+
+function CreditCardsView({
+  summaries,
+  onEdit,
+  onTogglePaid,
+}: {
+  summaries: CreditCardSummary[];
+  onEdit: (transaction: Transaction) => void;
+  onTogglePaid: (id: string) => void;
+}) {
+  const totalCurrentBalance = summaries.reduce((sum, card) => sum + card.currentBalance, 0);
+  const totalStatementBalance = summaries.reduce((sum, card) => sum + card.statementBalance, 0);
+  const totalMinimumPayment = summaries.reduce((sum, card) => sum + card.minimumPayment, 0);
+  const totalPlannedPayment = summaries.reduce((sum, card) => sum + card.plannedPayment, 0);
+  const totalCreditLimit = summaries.reduce((sum, card) => sum + (card.creditLimit || 0), 0);
+  const overallUtilization = totalCreditLimit > 0 ? totalCurrentBalance / totalCreditLimit : null;
+
+  return (
+    <div className="h-full overflow-y-auto p-8 animate-in fade-in duration-500">
+      <div className="max-w-7xl mx-auto space-y-6">
+        <div className="flex items-end justify-between gap-6">
+          <div>
+            <h2 className="font-serif italic text-3xl tracking-tight text-slate-900 border-b-2 border-blue-600 inline-block mb-1">Credit Cards</h2>
+            <p className="text-xs text-slate-500 font-medium">Track balances, due dates, payment plans, and utilization for this month.</p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-5 gap-4">
+          {[
+            { label: 'Current Balance', value: totalCurrentBalance, color: 'text-slate-900' },
+            { label: 'Statement Balance', value: totalStatementBalance, color: 'text-slate-900' },
+            { label: 'Minimum Due', value: totalMinimumPayment, color: 'text-rose-600' },
+            { label: 'Planned Payments', value: totalPlannedPayment, color: 'text-blue-600' },
+            { label: 'Utilization', value: overallUtilization, color: overallUtilization !== null && overallUtilization >= 0.3 ? 'text-rose-600' : 'text-emerald-600', percent: true },
+          ].map(stat => (
+            <div key={stat.label} className="border border-slate-200 bg-white p-4 rounded-lg shadow-sm">
+              <p className="text-[9px] uppercase font-bold tracking-widest text-slate-500 mb-1">{stat.label}</p>
+              <p className={cn("font-mono text-xl font-bold tracking-tight", stat.color)}>
+                {stat.percent
+                  ? stat.value === null ? '--' : `${Math.round((stat.value as number) * 100)}%`
+                  : `$${formatMoney(stat.value as number)}`}
+              </p>
+            </div>
+          ))}
+        </div>
+
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+          <table className="w-full text-sm border-collapse">
+            <thead className="bg-slate-50 border-b border-slate-200">
+              <tr className="text-left text-[10px] uppercase tracking-widest font-bold text-slate-500">
+                <th className="p-4">Card</th>
+                <th className="p-4">Due</th>
+                <th className="p-4 text-right">Current</th>
+                <th className="p-4 text-right">Statement</th>
+                <th className="p-4 text-right">Minimum</th>
+                <th className="p-4 text-right">Payment</th>
+                <th className="p-4 text-right">Limit</th>
+                <th className="p-4 text-right">Util.</th>
+                <th className="p-4 text-right">Status</th>
+                <th className="p-4 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="font-mono text-xs">
+              {summaries.length === 0 ? (
+                <tr>
+                  <td colSpan={10} className="p-12 text-center text-slate-400 italic font-serif">
+                    No credit cards tracked for this month. Toggle "Card?" on a ledger entry to add one.
+                  </td>
+                </tr>
+              ) : (
+                summaries.map(card => (
+                  <tr key={card.key} className="border-b border-slate-100 hover:bg-slate-50 transition-colors">
+                    <td className="p-4">
+                      <div className="flex flex-col">
+                        <span className="font-sans font-bold text-slate-900">{card.accountName}</span>
+                        {card.interestRate !== undefined && (
+                          <span className="font-sans text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                            {card.interestRate}% APR
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="p-4 text-slate-500">
+                      {card.dueDate ? format(parseISO(card.dueDate), 'MMM d') : '--'}
+                    </td>
+                    <td className="p-4 text-right font-bold text-slate-900">${formatMoney(card.currentBalance)}</td>
+                    <td className="p-4 text-right text-slate-600">${formatMoney(card.statementBalance)}</td>
+                    <td className="p-4 text-right text-rose-600">${formatMoney(card.minimumPayment)}</td>
+                    <td className="p-4 text-right">
+                      <div className="flex flex-col items-end">
+                        <span className="font-bold text-blue-600">${formatMoney(card.plannedPayment)}</span>
+                        <span className="font-sans text-[10px] font-bold uppercase tracking-wider">
+                          <PaymentPosture amount={card.plannedPayment} minimumPayment={card.minimumPayment} />
+                        </span>
+                      </div>
+                    </td>
+                    <td className="p-4 text-right text-slate-600">
+                      {card.creditLimit ? `$${formatMoney(card.creditLimit)}` : '--'}
+                    </td>
+                    <td className={cn(
+                      "p-4 text-right font-bold",
+                      card.utilization === null ? "text-slate-400" : card.utilization >= 0.3 ? "text-rose-600" : "text-emerald-600"
+                    )}>
+                      {card.utilization === null ? '--' : `${Math.round(card.utilization * 100)}%`}
+                    </td>
+                    <td className="p-4 text-right">
+                      <button
+                        type="button"
+                        onClick={() => onTogglePaid(card.transaction.id)}
+                        className={cn(
+                          "inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-[9px] font-bold uppercase tracking-wider transition-all",
+                          card.paid
+                            ? "border-emerald-200 bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
+                            : "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100"
+                        )}
+                      >
+                        {card.paid ? <CheckCircle2 className="w-3 h-3" /> : <Circle className="w-3 h-3" />}
+                        {card.paid ? 'Paid' : 'Unpaid'}
+                      </button>
+                    </td>
+                    <td className="p-4 text-right">
+                      <button
+                        type="button"
+                        onClick={() => onEdit(card.transaction)}
+                        className="p-1 px-3 border border-slate-200 rounded text-blue-600 hover:bg-blue-50 transition-all font-sans font-bold text-[10px] uppercase"
+                      >
+                        Edit
+                      </button>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1214,6 +1638,14 @@ function CyclePane({
                       </td>
                       <td className="p-3 border-r border-slate-100 text-slate-800 font-medium">
                         <span className="truncate block max-w-[150px]">{t.description}</span>
+                        {isCreditCardTransaction(t) && (
+                          <span className="mt-1 block max-w-[260px] truncate font-sans text-[10px] font-semibold text-slate-500">
+                            {t.accountName || t.description}
+                            {typeof t.currentBalance === 'number' && ` • Bal $${formatMoney(t.currentBalance)}`}
+                            {typeof t.minimumPayment === 'number' && ` • Min $${formatMoney(t.minimumPayment)}`}
+                            {t.dueDate && ` • Due ${format(parseISO(t.dueDate), 'MMM d')}`}
+                          </span>
+                        )}
                       </td>
                       <td className="p-3 border-r border-slate-100 text-slate-500">
                         <span className="truncate block max-w-[100px]">{t.category || '--'}</span>
@@ -1257,6 +1689,11 @@ function CyclePane({
                               label={comparison.previousMonthLabel}
                             />
                           ) : null}
+                          {isCreditCardTransaction(t) && (
+                            <span className="font-sans text-[9px] font-bold uppercase tracking-wider">
+                              <PaymentPosture amount={t.amount} minimumPayment={t.minimumPayment} />
+                            </span>
+                          )}
                         </div>
                       </td>
                       <td className="p-3 text-right">
