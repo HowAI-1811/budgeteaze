@@ -1357,17 +1357,6 @@ export default function App() {
                 />
               </div>
               <div className="flex flex-col gap-1">
-                <label className="text-[9px] uppercase font-bold tracking-wider text-slate-500">Statement</label>
-                <input
-                  type="number"
-                  step="0.01"
-                  value={statementBalance}
-                  onChange={(e) => setStatementBalance(e.target.value)}
-                  className="border border-slate-200 p-2 text-xs font-mono outline-none focus:bg-blue-50 focus:border-blue-500 rounded transition-all"
-                  placeholder="0.00"
-                />
-              </div>
-              <div className="flex flex-col gap-1">
                 <label className="text-[9px] uppercase font-bold tracking-wider text-slate-500">Minimum</label>
                 <input
                   type="number"
@@ -1427,7 +1416,6 @@ function CreditCardsView({
   onTogglePaid: (id: string) => void;
 }) {
   const totalCurrentBalance = summaries.reduce((sum, card) => sum + card.currentBalance, 0);
-  const totalStatementBalance = summaries.reduce((sum, card) => sum + card.statementBalance, 0);
   const totalMinimumPayment = summaries.reduce((sum, card) => sum + card.minimumPayment, 0);
   const totalPlannedPayment = summaries.reduce((sum, card) => sum + card.plannedPayment, 0);
   const totalCreditLimit = summaries.reduce((sum, card) => sum + (card.creditLimit || 0), 0);
@@ -1443,10 +1431,9 @@ function CreditCardsView({
           </div>
         </div>
 
-        <div className="grid grid-cols-5 gap-4">
+        <div className="grid grid-cols-4 gap-4">
           {[
             { label: 'Current Balance', value: totalCurrentBalance, color: 'text-slate-900' },
-            { label: 'Statement Balance', value: totalStatementBalance, color: 'text-slate-900' },
             { label: 'Minimum Due', value: totalMinimumPayment, color: 'text-rose-600' },
             { label: 'Planned Payments', value: totalPlannedPayment, color: 'text-blue-600' },
             { label: 'Utilization', value: overallUtilization, color: overallUtilization !== null && overallUtilization >= 0.3 ? 'text-rose-600' : 'text-emerald-600', percent: true },
@@ -1469,7 +1456,6 @@ function CreditCardsView({
                 <th className="p-4">Card</th>
                 <th className="p-4">Due</th>
                 <th className="p-4 text-right">Current</th>
-                <th className="p-4 text-right">Statement</th>
                 <th className="p-4 text-right">Minimum</th>
                 <th className="p-4 text-right">Payment</th>
                 <th className="p-4 text-right">Limit</th>
@@ -1481,7 +1467,7 @@ function CreditCardsView({
             <tbody className="font-mono text-xs">
               {summaries.length === 0 ? (
                 <tr>
-                  <td colSpan={10} className="p-12 text-center text-slate-400 italic font-serif">
+                  <td colSpan={9} className="p-12 text-center text-slate-400 italic font-serif">
                     No credit cards tracked for this month. Toggle "Card?" on a ledger entry to add one.
                   </td>
                 </tr>
@@ -1502,7 +1488,6 @@ function CreditCardsView({
                       {card.dueDate ? format(parseISO(card.dueDate), 'MMM d') : '--'}
                     </td>
                     <td className="p-4 text-right font-bold text-slate-900">${formatMoney(card.currentBalance)}</td>
-                    <td className="p-4 text-right text-slate-600">${formatMoney(card.statementBalance)}</td>
                     <td className="p-4 text-right text-rose-600">${formatMoney(card.minimumPayment)}</td>
                     <td className="p-4 text-right">
                       <div className="flex flex-col items-end">
