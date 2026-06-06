@@ -29,7 +29,12 @@ import {
   Upload,
   CheckCircle2,
   Circle,
-  CreditCard
+  CreditCard,
+  Repeat2,
+  Globe,
+  Pause,
+  Play,
+  Ban
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -47,11 +52,25 @@ import {
   Legend
 } from 'recharts';
 import { cn } from './lib/utils';
-import { Transaction, TransactionType } from './types';
+import { Transaction, TransactionType, Subscription, SubscriptionStatus, BillingCycle } from './types';
+import {
+  SUBSCRIPTIONS_STORAGE_KEY,
+  loadSubscriptions,
+  saveSubscriptions,
+  createSubscription,
+  touchSubscription,
+  tombstoneSubscription,
+  isLiveSubscription,
+  getMonthlyEquivalent,
+  getNextBillingDate,
+  subscriptionBillsInMonth,
+  sanitizeSubscription,
+  type SubscriptionInput,
+} from './lib/subscriptions';
 
 const STORAGE_KEY = 'cyclebudget_data';
 const CATEGORY_STORAGE_KEY = 'cyclebudget_categories';
-type ViewType = 'ledger' | 'dashboard' | 'creditCards' | 'recurring' | 'categories';
+type ViewType = 'ledger' | 'dashboard' | 'creditCards' | 'recurring' | 'subscriptions' | 'categories';
 
 type TransactionComparison = {
   previousAmount: number | null;
@@ -268,6 +287,8 @@ export default function App() {
     const saved = localStorage.getItem(CATEGORY_STORAGE_KEY);
     return saved ? JSON.parse(saved) : [];
   });
+  // Raw list includes soft-deleted tombstones (kept for future sync).
+  const [subscriptions, setSubscriptions] = useState<Subscription[]>(() => loadSubscriptions());
 
   const [currentDate, setCurrentDate] = useState(new Date());
   const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
@@ -303,6 +324,36 @@ export default function App() {
   }, [categories]);
 
   useEffect(() => {
+    saveSubscriptions(subscriptions);
+  }, [subscriptions]);
+
+  // Live (non-tombstoned) subscriptions — what every view and the injection
+  // logic should operate on. The raw `subscriptions` array is only for
+  // persistence + the recurring-effect guard below.
+  const visibleSubscriptions = useMemo(
+    () => subscriptions.filter(isLiveSubscription),
+    [subscriptions],
+  );
+
+  // All subscription ids ever created (incl. tombstones). Used to stop the
+  // legacy recurring-injection effect from treating subscription-generated
+  // transactions as manual recurring series.
+  const subscriptionIds = useMemo(
+    () => new Set(subscriptions.map(s => s.id)),
+    [subscriptions],
+  );
+
+  const activeSubscriptions = useMemo(
+    () => visibleSubscriptions.filter(s => s.status === 'active'),
+    [visibleSubscriptions],
+  );
+
+  const subscriptionMonthlyTotal = useMemo(
+    () => activeSubscriptions.reduce((sum, s) => sum + getMonthlyEquivalent(s), 0),
+    [activeSubscriptions],
+  );
+
+  useEffect(() => {
     if (!editingTransaction) {
       setDate(getDefaultEntryDate(currentDate));
     }
@@ -317,7 +368,9 @@ export default function App() {
     setTransactions(prev => {
       const uniqueRecurringIds = Array.from(new Set(
         prev
-          .filter(t => t.isRecurring && t.recurringId)
+          // Skip transactions owned by a subscription — those are injected by
+          // the dedicated subscription effect below, not cloned month-to-month.
+          .filter(t => t.isRecurring && t.recurringId && !subscriptionIds.has(t.recurringId))
           .map(t => t.recurringId!)
       ));
 
@@ -349,7 +402,50 @@ export default function App() {
 
       return [...prev, ...newEntries];
     });
-  }, [currentDate]); 
+  }, [currentDate, subscriptionIds]);
+
+  // Subscription auto-injection: for the viewed month, create a ledger
+  // transaction for each active subscription that bills this month and doesn't
+  // already have one. Mirrors the StrictMode-safe pattern above: functional
+  // updater + missing-check, so double-invocation can't duplicate entries.
+  useEffect(() => {
+    setTransactions(prev => {
+      const due = visibleSubscriptions.filter(sub =>
+        subscriptionBillsInMonth(sub, currentDate)
+      );
+      if (due.length === 0) return prev;
+
+      const currentMonthStr = format(currentDate, 'yyyy-MM');
+      const existingInMonth = prev.filter(t => t.date.startsWith(currentMonthStr));
+
+      const missing = due.filter(sub =>
+        !existingInMonth.some(t => t.recurringId === sub.id)
+      );
+      if (missing.length === 0) return prev;
+
+      const newEntries: Transaction[] = missing.map(sub => {
+        const billingDay = Math.min(sub.billingDay, 28);
+        const targetDate = format(
+          new Date(currentDate.getFullYear(), currentDate.getMonth(), billingDay),
+          'yyyy-MM-dd'
+        );
+        return {
+          id: crypto.randomUUID(),
+          description: sub.name,
+          amount: sub.amount,
+          type: 'debit' as const,
+          date: targetDate,
+          category: sub.category,
+          isRecurring: true,
+          recurringId: sub.id,
+          paid: false,
+          notes: sub.notes,
+        };
+      });
+
+      return [...prev, ...newEntries];
+    });
+  }, [currentDate, visibleSubscriptions]);
 
   const monthStart = startOfMonth(currentDate);
   const monthEnd = endOfMonth(currentDate);
@@ -537,6 +633,43 @@ export default function App() {
     }
   };
 
+  const addSubscription = (input: SubscriptionInput) => {
+    setSubscriptions(prev => [...prev, createSubscription(input)]);
+  };
+
+  const updateSubscription = (id: string, changes: Partial<Subscription>) => {
+    setSubscriptions(prev =>
+      prev.map(s => (s.id === id ? touchSubscription(s, changes) : s))
+    );
+  };
+
+  // Soft delete (tombstone) so the deletion can sync later. Optionally cascade
+  // to the ledger transactions this subscription generated.
+  const deleteSubscription = (id: string, deleteTransactions: boolean = false) => {
+    setSubscriptions(prev =>
+      prev.map(s => (s.id === id ? tombstoneSubscription(s) : s))
+    );
+    if (deleteTransactions) {
+      setTransactions(prev => prev.filter(t => t.recurringId !== id));
+    }
+  };
+
+  const changeSubscriptionStatus = (id: string, status: SubscriptionStatus) => {
+    setSubscriptions(prev =>
+      prev.map(s =>
+        s.id === id
+          ? touchSubscription(s, {
+              status,
+              cancelledDate:
+                status === 'cancelled'
+                  ? format(new Date(), 'yyyy-MM-dd')
+                  : s.cancelledDate,
+            })
+          : s
+      )
+    );
+  };
+
   const handleExportCSV = () => {
     const headers = [
       'Date',
@@ -591,9 +724,10 @@ export default function App() {
 
   const handleExportJSON = () => {
     const backup = {
-      version: 1,
+      version: 2,
       exportedAt: new Date().toISOString(),
       categories,
+      subscriptions,
       transactions,
     };
 
@@ -630,8 +764,20 @@ export default function App() {
 
       const importedCategories = getCategoriesFromBackup(backup, importedTransactions);
 
+      // Subscriptions are optional (absent in v1 files → []). Unlike
+      // transactions, a single bad subscription record is skipped rather than
+      // rejecting the whole file.
+      const rawSubs = Array.isArray((backup as { subscriptions?: unknown }).subscriptions)
+        ? (backup as { subscriptions: unknown[] }).subscriptions
+        : [];
+      const importedSubscriptions: Subscription[] = [];
+      for (const item of rawSubs) {
+        const sub = sanitizeSubscription(item);
+        if (sub) importedSubscriptions.push(sub);
+      }
+
       const shouldReplace = confirm(
-        `Import ${importedTransactions.length} transactions and ${importedCategories.length} categories?\nThis will replace your current saved data.`
+        `Import ${importedTransactions.length} transactions, ${importedCategories.length} categories, and ${importedSubscriptions.length} subscriptions?\nThis will replace your current saved data.`
       );
 
       if (shouldReplace) {
@@ -643,6 +789,7 @@ export default function App() {
         );
         setTransactions(deduped);
         setCategories(importedCategories);
+        setSubscriptions(importedSubscriptions);
         resetForm();
         // Brief confirmation so the user knows import succeeded
         setTimeout(() =>
@@ -826,6 +973,16 @@ export default function App() {
                 <RefreshCw className="w-3.5 h-3.5" />
                 Recurring
               </button>
+              <button
+                onClick={() => setActiveView('subscriptions')}
+                className={cn(
+                  "flex items-center gap-2 px-4 py-1.5 rounded-md text-[11px] font-bold uppercase tracking-wider transition-all",
+                  activeView === 'subscriptions' ? "bg-white text-blue-600 shadow-sm" : "text-slate-500 hover:text-slate-900"
+                )}
+              >
+                <Repeat2 className="w-3.5 h-3.5" />
+                Subscriptions
+              </button>
               <button 
                 onClick={() => setActiveView('categories')}
                 className={cn(
@@ -938,6 +1095,7 @@ export default function App() {
               onDelete={deleteTransaction}
               onTogglePaid={togglePaid}
               comparison={monthComparison}
+              subscriptionIds={subscriptionIds}
               headerBg="bg-slate-900"
               headerText="text-white"
             />
@@ -948,6 +1106,7 @@ export default function App() {
               onDelete={deleteTransaction}
               onTogglePaid={togglePaid}
               comparison={monthComparison}
+              subscriptionIds={subscriptionIds}
               headerBg="bg-slate-100"
               headerText="text-slate-900"
               borderLeft
@@ -955,12 +1114,13 @@ export default function App() {
           </div>
         ) : activeView === 'dashboard' ? (
           <div className="h-full overflow-y-auto p-8 space-y-8 animate-in fade-in duration-500">
-            <div className="grid grid-cols-4 gap-6">
+            <div className="grid grid-cols-5 gap-6">
               {[
                 { label: 'Total Income', val: totalIncome, color: 'text-emerald-600', bg: 'bg-emerald-50' },
                 { label: 'Total Expenses', val: totalExpenses, color: 'text-rose-600', bg: 'bg-rose-50' },
                 { label: 'Net Cash Flow', val: totalBalance, color: totalBalance >= 0 ? 'text-blue-600' : 'text-rose-700', bg: 'bg-blue-50' },
-                { label: 'Monthly Burn', val: totalExpenses / (monthTransactions.length || 1), color: 'text-slate-600', bg: 'bg-slate-100' }
+                { label: 'Monthly Burn', val: totalExpenses / (monthTransactions.length || 1), color: 'text-slate-600', bg: 'bg-slate-100' },
+                { label: 'Subscriptions/mo', val: subscriptionMonthlyTotal, color: 'text-violet-600', bg: 'bg-violet-50' }
               ].map((stat, i) => (
                 <div key={i} className={cn("p-6 rounded-xl border border-slate-200 bg-white shadow-sm", stat.bg)}>
                   <p className="text-[10px] uppercase font-bold tracking-[0.2em] text-slate-500 mb-2">{stat.label}</p>
@@ -1030,6 +1190,44 @@ export default function App() {
                 </ResponsiveContainer>
               </div>
             </div>
+
+            {activeSubscriptions.length > 0 && (
+              <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+                <div className="flex items-baseline justify-between mb-6">
+                  <h3 className="text-xs uppercase font-bold tracking-widest text-slate-500">
+                    Subscription Costs (Monthly Equivalent)
+                  </h3>
+                  <span className="font-mono text-xs font-bold text-violet-600">
+                    ${formatMoney(subscriptionMonthlyTotal)}/mo · ${formatMoney(subscriptionMonthlyTotal * 12)}/yr
+                  </span>
+                </div>
+                <div className="space-y-3">
+                  {[...activeSubscriptions]
+                    .map(s => ({ sub: s, monthly: getMonthlyEquivalent(s) }))
+                    .sort((a, b) => b.monthly - a.monthly)
+                    .map(({ sub, monthly }) => {
+                      const pct = subscriptionMonthlyTotal > 0 ? (monthly / subscriptionMonthlyTotal) * 100 : 0;
+                      return (
+                        <div key={sub.id} className="flex items-center gap-3">
+                          <span className="w-32 shrink-0 truncate text-xs font-sans font-semibold text-slate-700 flex items-center gap-2">
+                            <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: sub.color || '#6366F1' }} />
+                            {sub.name}
+                          </span>
+                          <div className="flex-1 h-4 rounded bg-slate-100 overflow-hidden">
+                            <div className="h-full rounded" style={{ width: `${pct}%`, backgroundColor: sub.color || '#6366F1' }} />
+                          </div>
+                          <span className="w-36 shrink-0 text-right font-mono text-xs text-slate-600">
+                            ${formatMoney(monthly)}/mo
+                            {sub.billingCycle !== 'monthly' && (
+                              <span className="text-slate-400"> · ${formatMoney(sub.amount)}/{sub.billingCycle === 'annual' ? 'yr' : sub.billingCycle === 'quarterly' ? 'qtr' : 'wk'}</span>
+                            )}
+                          </span>
+                        </div>
+                      );
+                    })}
+                </div>
+              </div>
+            )}
           </div>
         ) : activeView === 'creditCards' ? (
           <CreditCardsView
@@ -1065,10 +1263,20 @@ export default function App() {
                      {Array.from(new Set(transactions.filter(t => t.isRecurring && t.recurringId).map(t => t.recurringId))).map(rid => {
                        const series = transactions.filter(t => t.recurringId === rid).sort((a,b) => parseISO(b.date).getTime() - parseISO(a.date).getTime());
                        const latest = series[0];
+                       const isFromSubscription = !!rid && subscriptionIds.has(rid);
                        return (
                          <tr key={rid} className="border-b border-slate-100 hover:bg-slate-50 transition-colors">
                            <td className="p-4 text-slate-400">Day {getDate(parseISO(latest.date))}</td>
-                           <td className="p-4 font-sans font-bold text-slate-900">{latest.description}</td>
+                           <td className="p-4 font-sans font-bold text-slate-900">
+                             <span className="flex items-center gap-2">
+                               {latest.description}
+                               {isFromSubscription && (
+                                 <span className="inline-flex items-center gap-1 rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-violet-700">
+                                   <Repeat2 className="w-2.5 h-2.5" /> Subscription
+                                 </span>
+                               )}
+                             </span>
+                           </td>
                            <td className="p-4 font-sans text-slate-500">{latest.category || '--'}</td>
                            <td className={cn("p-4 text-right font-bold", latest.type === 'credit' ? 'text-emerald-600' : 'text-slate-900')}>
                              {latest.type === 'credit' ? '+' : '-'}${latest.amount.toLocaleString(undefined, { minimumFractionDigits: 2 })}
@@ -1076,12 +1284,16 @@ export default function App() {
                            <td className="p-4 text-right space-x-2">
                              <button 
                                onClick={() => {
+                                 if (isFromSubscription) {
+                                   setActiveView('subscriptions');
+                                   return;
+                                 }
                                  setActiveView('ledger');
                                  editTransaction(latest);
                                }}
                                className="p-1 px-3 border border-slate-200 rounded text-blue-600 hover:bg-blue-50 transition-all font-sans font-bold text-[10px] uppercase"
                              >
-                               Edit Series
+                               {isFromSubscription ? 'Manage Sub' : 'Edit Series'}
                              </button>
                              <button 
                                onClick={() => {
@@ -1109,6 +1321,16 @@ export default function App() {
                </div>
              </div>
           </div>
+        ) : activeView === 'subscriptions' ? (
+          <SubscriptionsView
+            subscriptions={visibleSubscriptions}
+            categories={categories}
+            currentDate={currentDate}
+            onAdd={addSubscription}
+            onUpdate={updateSubscription}
+            onDelete={deleteSubscription}
+            onStatusChange={changeSubscriptionStatus}
+          />
         ) : (
           <div className="h-full overflow-y-auto p-8 animate-in slide-in-from-right duration-500">
             <div className="max-w-3xl mx-auto space-y-6">
@@ -1548,6 +1770,7 @@ function CyclePane({
   onDelete, 
   onTogglePaid,
   comparison,
+  subscriptionIds,
   headerBg, 
   headerText,
   borderLeft = false
@@ -1558,6 +1781,7 @@ function CyclePane({
   onDelete: (id: string, cascade?: boolean) => void;
   onTogglePaid: (id: string) => void;
   comparison: MonthComparison;
+  subscriptionIds: Set<string>;
   headerBg: string;
   headerText: string;
   borderLeft?: boolean;
@@ -1617,7 +1841,11 @@ function CyclePane({
                     >
                       <td className="p-3 border-r border-slate-100 w-16">
                         <div className="flex items-center gap-1">
-                          {t.isRecurring && <RefreshCw className="w-2.5 h-2.5 text-blue-500 shrink-0" />}
+                          {t.isRecurring && (
+                            t.recurringId && subscriptionIds.has(t.recurringId)
+                              ? <Repeat2 className="w-2.5 h-2.5 text-violet-500 shrink-0" />
+                              : <RefreshCw className="w-2.5 h-2.5 text-blue-500 shrink-0" />
+                          )}
                           {format(parseISO(t.date), 'MM-dd')}
                         </div>
                       </td>
@@ -1719,5 +1947,393 @@ function CyclePane({
         </table>
       </div>
     </section>
+  );
+}
+
+const SUBSCRIPTION_COLORS = ['#2563EB', '#7C3AED', '#DB2777', '#EA580C', '#F59E0B', '#10B981', '#06B6D4', '#6366F1'];
+
+const BILLING_CYCLE_LABELS: Record<BillingCycle, string> = {
+  weekly: 'Weekly',
+  monthly: 'Monthly',
+  quarterly: 'Quarterly',
+  annual: 'Annual',
+};
+
+const BILLING_CYCLE_SUFFIX: Record<BillingCycle, string> = {
+  weekly: 'wk',
+  monthly: 'mo',
+  quarterly: 'qtr',
+  annual: 'yr',
+};
+
+type SubscriptionFormState = {
+  name: string;
+  amount: string;
+  billingCycle: BillingCycle;
+  billingDay: string;
+  category: string;
+  status: SubscriptionStatus;
+  startDate: string;
+  trialEndDate: string;
+  autoCreateTransaction: boolean;
+  url: string;
+  notes: string;
+  color: string;
+};
+
+const emptySubscriptionForm = (): SubscriptionFormState => ({
+  name: '',
+  amount: '',
+  billingCycle: 'monthly',
+  billingDay: '1',
+  category: '',
+  status: 'active',
+  startDate: format(new Date(), 'yyyy-MM-dd'),
+  trialEndDate: '',
+  autoCreateTransaction: true,
+  url: '',
+  notes: '',
+  color: SUBSCRIPTION_COLORS[0],
+});
+
+function SubscriptionsView({
+  subscriptions,
+  categories,
+  currentDate,
+  onAdd,
+  onUpdate,
+  onDelete,
+  onStatusChange,
+}: {
+  subscriptions: Subscription[];
+  categories: string[];
+  currentDate: Date;
+  onAdd: (input: SubscriptionInput) => void;
+  onUpdate: (id: string, changes: Partial<Subscription>) => void;
+  onDelete: (id: string, deleteTransactions?: boolean) => void;
+  onStatusChange: (id: string, status: SubscriptionStatus) => void;
+}) {
+  const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [form, setForm] = useState<SubscriptionFormState>(emptySubscriptionForm);
+
+  const setField = <K extends keyof SubscriptionFormState>(key: K, value: SubscriptionFormState[K]) =>
+    setForm(prev => ({ ...prev, [key]: value }));
+
+  const resetForm = () => {
+    setForm(emptySubscriptionForm());
+    setEditingId(null);
+    setShowForm(false);
+  };
+
+  const startEdit = (sub: Subscription) => {
+    setEditingId(sub.id);
+    setForm({
+      name: sub.name,
+      amount: sub.amount.toString(),
+      billingCycle: sub.billingCycle,
+      billingDay: sub.billingDay.toString(),
+      category: sub.category || '',
+      status: sub.status,
+      startDate: sub.startDate ? sub.startDate.slice(0, 10) : format(new Date(), 'yyyy-MM-dd'),
+      trialEndDate: sub.trialEndDate ? sub.trialEndDate.slice(0, 10) : '',
+      autoCreateTransaction: sub.autoCreateTransaction,
+      url: sub.url || '',
+      notes: sub.notes || '',
+      color: sub.color || SUBSCRIPTION_COLORS[0],
+    });
+    setShowForm(true);
+  };
+
+  const handleSubmit = () => {
+    const name = form.name.trim();
+    const amount = parseFloat(form.amount);
+    if (!name || !Number.isFinite(amount)) return;
+
+    const billingDay = Math.min(Math.max(Math.round(parseInt(form.billingDay, 10) || 1), 1), 28);
+
+    const payload: SubscriptionInput = {
+      name,
+      amount,
+      billingCycle: form.billingCycle,
+      billingDay,
+      category: form.category || undefined,
+      status: form.status,
+      startDate: form.startDate,
+      trialEndDate: form.trialEndDate || undefined,
+      autoCreateTransaction: form.autoCreateTransaction,
+      url: form.url.trim() || undefined,
+      notes: form.notes.trim() || undefined,
+      color: form.color,
+    };
+
+    if (editingId) {
+      onUpdate(editingId, payload);
+    } else {
+      onAdd(payload);
+    }
+    resetForm();
+  };
+
+  const monthlyTotal = subscriptions
+    .filter(s => s.status === 'active')
+    .reduce((sum, s) => sum + getMonthlyEquivalent(s), 0);
+  const activeCount = subscriptions.filter(s => s.status === 'active').length;
+  const pausedCount = subscriptions.filter(s => s.status === 'paused').length;
+  const cancelledCount = subscriptions.filter(s => s.status === 'cancelled').length;
+
+  const today = new Date();
+
+  const statusPill = (status: SubscriptionStatus) => {
+    const styles: Record<SubscriptionStatus, string> = {
+      active: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+      paused: 'border-amber-200 bg-amber-50 text-amber-700',
+      cancelled: 'border-rose-200 bg-rose-50 text-rose-700',
+    };
+    return (
+      <span className={cn('inline-flex items-center rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider', styles[status])}>
+        {status}
+      </span>
+    );
+  };
+
+  const summary = [
+    { label: 'Monthly Cost', value: `$${formatMoney(monthlyTotal)}`, color: 'text-violet-600', bg: 'bg-violet-50' },
+    { label: 'Annual Exposure', value: `$${formatMoney(monthlyTotal * 12)}`, color: 'text-blue-600', bg: 'bg-blue-50' },
+    { label: 'Active', value: activeCount.toString(), color: 'text-emerald-600', bg: 'bg-emerald-50' },
+    { label: 'Paused / Cancelled', value: `${pausedCount} / ${cancelledCount}`, color: 'text-slate-600', bg: 'bg-slate-100' },
+  ];
+
+  return (
+    <div className="h-full overflow-y-auto p-8 animate-in slide-in-from-right duration-500">
+      <div className="max-w-6xl mx-auto space-y-6">
+        <div className="flex justify-between items-center">
+          <div>
+            <h2 className="font-serif italic text-3xl tracking-tight text-slate-900 border-b-2 border-blue-600 inline-block mb-1">Subscriptions</h2>
+            <p className="text-xs text-slate-500 font-medium">Track recurring services and auto-post their charges to the ledger.</p>
+          </div>
+          <button
+            onClick={() => { resetForm(); setShowForm(true); }}
+            className="flex items-center gap-2 px-4 bg-blue-600 text-white text-[11px] uppercase tracking-widest font-bold py-2.5 hover:bg-blue-700 rounded transition-colors"
+          >
+            <Plus className="w-3.5 h-3.5" /> New Subscription
+          </button>
+        </div>
+
+        <div className="grid grid-cols-4 gap-6">
+          {summary.map((card, i) => (
+            <div key={i} className={cn('p-6 rounded-xl border border-slate-200 bg-white shadow-sm', card.bg)}>
+              <p className="text-[10px] uppercase font-bold tracking-[0.2em] text-slate-500 mb-2">{card.label}</p>
+              <p className={cn('font-mono text-2xl font-bold tracking-tighter', card.color)}>{card.value}</p>
+            </div>
+          ))}
+        </div>
+
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+          <table className="w-full text-sm border-collapse">
+            <thead className="bg-slate-50 border-b border-slate-200">
+              <tr className="text-left text-[10px] uppercase tracking-widest font-bold text-slate-500">
+                <th className="p-4">Service</th>
+                <th className="p-4">Category</th>
+                <th className="p-4 text-right">Amount</th>
+                <th className="p-4">Cycle</th>
+                <th className="p-4">Next Charge</th>
+                <th className="p-4">Status</th>
+                <th className="p-4 text-center">Auto-Ledger</th>
+                <th className="p-4 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="text-xs">
+              {subscriptions.length === 0 && (
+                <tr>
+                  <td colSpan={8} className="p-12 text-center text-slate-400 italic font-serif">
+                    No subscriptions yet. Add one to start tracking recurring spend.
+                  </td>
+                </tr>
+              )}
+              {[...subscriptions]
+                .sort((a, b) => getMonthlyEquivalent(b) - getMonthlyEquivalent(a))
+                .map(sub => {
+                  const isTrial = !!sub.trialEndDate && parseISO(sub.trialEndDate) > today;
+                  return (
+                    <tr key={sub.id} className="border-b border-slate-100 hover:bg-slate-50 transition-colors">
+                      <td className="p-4">
+                        <div className="flex items-center gap-2 font-sans font-bold text-slate-900">
+                          <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: sub.color || '#6366F1' }} />
+                          {sub.name}
+                          {sub.url && (
+                            <a href={sub.url} target="_blank" rel="noreferrer" className="text-slate-400 hover:text-blue-600" title="Manage subscription">
+                              <Globe className="w-3 h-3" />
+                            </a>
+                          )}
+                          {isTrial && (
+                            <span className="inline-flex items-center rounded-full border border-cyan-200 bg-cyan-50 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-cyan-700">Trial</span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="p-4 font-sans text-slate-500">{sub.category || '--'}</td>
+                      <td className="p-4 text-right font-mono">
+                        <div className="font-bold text-slate-900">${formatMoney(getMonthlyEquivalent(sub))}<span className="text-slate-400 font-normal">/mo</span></div>
+                        {sub.billingCycle !== 'monthly' && (
+                          <div className="text-[10px] text-slate-400">${formatMoney(sub.amount)}/{BILLING_CYCLE_SUFFIX[sub.billingCycle]}</div>
+                        )}
+                      </td>
+                      <td className="p-4 font-sans text-slate-600">{BILLING_CYCLE_LABELS[sub.billingCycle]}</td>
+                      <td className="p-4 font-mono text-slate-600">
+                        {sub.status === 'active' ? format(parseISO(getNextBillingDate(sub, currentDate)), 'MMM d') : '--'}
+                      </td>
+                      <td className="p-4">{statusPill(sub.status)}</td>
+                      <td className="p-4 text-center">
+                        {sub.autoCreateTransaction
+                          ? <CheckCircle2 className="w-4 h-4 text-emerald-500 inline" />
+                          : <Circle className="w-4 h-4 text-slate-300 inline" />}
+                      </td>
+                      <td className="p-4">
+                        <div className="flex justify-end gap-1">
+                          <button onClick={() => startEdit(sub)} className="p-1.5 text-slate-500 hover:text-blue-600 transition-colors" title="Edit">
+                            <Edit2 className="w-3.5 h-3.5" />
+                          </button>
+                          {sub.status === 'active' ? (
+                            <button onClick={() => onStatusChange(sub.id, 'paused')} className="p-1.5 text-slate-500 hover:text-amber-600 transition-colors" title="Pause">
+                              <Pause className="w-3.5 h-3.5" />
+                            </button>
+                          ) : sub.status === 'paused' ? (
+                            <button onClick={() => onStatusChange(sub.id, 'active')} className="p-1.5 text-slate-500 hover:text-emerald-600 transition-colors" title="Resume">
+                              <Play className="w-3.5 h-3.5" />
+                            </button>
+                          ) : null}
+                          {sub.status !== 'cancelled' && (
+                            <button onClick={() => onStatusChange(sub.id, 'cancelled')} className="p-1.5 text-slate-500 hover:text-rose-600 transition-colors" title="Cancel">
+                              <Ban className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                          <button
+                            onClick={() => {
+                              const cascade = confirm(
+                                `Delete "${sub.name}"?\n\nOK = also remove its ledger transactions.\nCancel = keep this subscription.`
+                              );
+                              if (cascade) onDelete(sub.id, true);
+                            }}
+                            className="p-1.5 text-slate-500 hover:text-rose-900 transition-colors"
+                            title="Delete subscription"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+            </tbody>
+          </table>
+        </div>
+
+        {showForm && (
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6 space-y-4">
+            <div className="flex justify-between items-center">
+              <h3 className="text-xs uppercase font-bold tracking-widest text-slate-500">
+                {editingId ? 'Edit Subscription' : 'New Subscription'}
+              </h3>
+              <button onClick={resetForm} className="text-slate-400 hover:text-slate-700"><X className="w-4 h-4" /></button>
+            </div>
+
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+              <label className="flex flex-col gap-1 col-span-2 md:col-span-1">
+                <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500">Name *</span>
+                <input value={form.name} onChange={e => setField('name', e.target.value)} className="border border-slate-200 p-2 text-xs rounded outline-none focus:bg-blue-50 focus:border-blue-500" placeholder="Netflix" />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500">Amount *</span>
+                <input type="number" step="0.01" value={form.amount} onChange={e => setField('amount', e.target.value)} className="border border-slate-200 p-2 text-xs rounded outline-none focus:bg-blue-50 focus:border-blue-500" placeholder="15.49" />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500">Billing Cycle</span>
+                <select value={form.billingCycle} onChange={e => setField('billingCycle', e.target.value as BillingCycle)} className="border border-slate-200 p-2 text-xs rounded outline-none focus:bg-blue-50 focus:border-blue-500">
+                  <option value="weekly">Weekly</option>
+                  <option value="monthly">Monthly</option>
+                  <option value="quarterly">Quarterly</option>
+                  <option value="annual">Annual</option>
+                </select>
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500">Billing Day (1–28)</span>
+                <input type="number" min={1} max={28} value={form.billingDay} onChange={e => setField('billingDay', e.target.value)} className="border border-slate-200 p-2 text-xs rounded outline-none focus:bg-blue-50 focus:border-blue-500" />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500">Category</span>
+                <select value={form.category} onChange={e => setField('category', e.target.value)} className="border border-slate-200 p-2 text-xs rounded outline-none focus:bg-blue-50 focus:border-blue-500">
+                  <option value="">--</option>
+                  {categories.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500">Status</span>
+                <select value={form.status} onChange={e => setField('status', e.target.value as SubscriptionStatus)} className="border border-slate-200 p-2 text-xs rounded outline-none focus:bg-blue-50 focus:border-blue-500">
+                  <option value="active">Active</option>
+                  <option value="paused">Paused</option>
+                  <option value="cancelled">Cancelled</option>
+                </select>
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500">Start Date</span>
+                <input type="date" value={form.startDate} onChange={e => setField('startDate', e.target.value)} className="border border-slate-200 p-2 text-xs rounded outline-none focus:bg-blue-50 focus:border-blue-500" />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500">Trial Ends (optional)</span>
+                <input type="date" value={form.trialEndDate} onChange={e => setField('trialEndDate', e.target.value)} className="border border-slate-200 p-2 text-xs rounded outline-none focus:bg-blue-50 focus:border-blue-500" />
+              </label>
+              <label className="flex flex-col gap-1 col-span-2 md:col-span-1">
+                <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500">Manage URL (optional)</span>
+                <input value={form.url} onChange={e => setField('url', e.target.value)} className="border border-slate-200 p-2 text-xs rounded outline-none focus:bg-blue-50 focus:border-blue-500" placeholder="https://..." />
+              </label>
+              <label className="flex flex-col gap-1 col-span-2 md:col-span-3">
+                <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500">Notes (optional)</span>
+                <input value={form.notes} onChange={e => setField('notes', e.target.value)} className="border border-slate-200 p-2 text-xs rounded outline-none focus:bg-blue-50 focus:border-blue-500" />
+              </label>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-4 pt-2">
+              <div className="flex items-center gap-3">
+                <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500">Color</span>
+                <div className="flex gap-1.5">
+                  {SUBSCRIPTION_COLORS.map(c => (
+                    <button
+                      key={c}
+                      type="button"
+                      onClick={() => setField('color', c)}
+                      className={cn('w-5 h-5 rounded-full border-2 transition-transform', form.color === c ? 'border-slate-900 scale-110' : 'border-transparent')}
+                      style={{ backgroundColor: c }}
+                    />
+                  ))}
+                </div>
+              </div>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <button
+                  type="button"
+                  onClick={() => setField('autoCreateTransaction', !form.autoCreateTransaction)}
+                  className={cn('w-9 h-5 rounded-full transition-colors relative', form.autoCreateTransaction ? 'bg-blue-600' : 'bg-slate-300')}
+                >
+                  <span className={cn('absolute top-0.5 w-4 h-4 bg-white rounded-full transition-all', form.autoCreateTransaction ? 'left-[18px]' : 'left-0.5')} />
+                </button>
+                <span className="text-[11px] font-semibold text-slate-600">Auto-post charges to ledger</span>
+              </label>
+            </div>
+
+            {form.billingDay && parseInt(form.billingDay, 10) > 28 && (
+              <p className="text-[10px] text-amber-600 font-semibold">Days 29–31 aren't supported — use 28 to approximate month-end billing.</p>
+            )}
+
+            <div className="flex gap-3 pt-2">
+              <button onClick={handleSubmit} className="px-5 bg-blue-600 text-white text-[11px] uppercase tracking-widest font-bold py-2.5 hover:bg-blue-700 rounded transition-colors">
+                {editingId ? 'Save Changes' : 'Add Subscription'}
+              </button>
+              <button onClick={resetForm} className="px-5 border border-slate-200 text-slate-600 text-[11px] uppercase tracking-widest font-bold py-2.5 hover:bg-slate-50 rounded transition-colors">
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
