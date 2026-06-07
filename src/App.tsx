@@ -72,6 +72,14 @@ const STORAGE_KEY = 'cyclebudget_data';
 const CATEGORY_STORAGE_KEY = 'cyclebudget_categories';
 type ViewType = 'ledger' | 'dashboard' | 'creditCards' | 'recurring' | 'subscriptions' | 'categories';
 
+type TrendPoint = {
+  name: string;
+  Income: number;
+  Expenses: number;
+  Balance: number;
+  hasActivity: boolean;
+};
+
 type TransactionComparison = {
   previousAmount: number | null;
   delta: number | null;
@@ -104,6 +112,22 @@ type CreditCardSummary = {
 const formatMoney = (value: number) => {
   return value.toLocaleString(undefined, { minimumFractionDigits: 2 });
 };
+
+function CashFlowTooltip({ active, payload, label }: any) {
+  const point = payload?.[0]?.payload as TrendPoint | undefined;
+
+  if (!active || !point?.hasActivity) return null;
+
+  return (
+    <div className="rounded-lg bg-white px-4 py-3 shadow-lg border border-slate-100">
+      <p className="text-sm font-semibold text-slate-900 mb-2">{label}</p>
+      <div className="space-y-1 text-xs font-mono">
+        <p className="text-emerald-600">Income: ${formatMoney(point.Income)}</p>
+        <p className="text-rose-600">Expenses: ${formatMoney(point.Expenses)}</p>
+      </div>
+    </div>
+  );
+}
 
 const getSavingsRate = (income: number, balance: number) => {
   return income > 0 ? balance / income : 0;
@@ -901,7 +925,7 @@ export default function App() {
     const pieData = Object.entries(categoryMap).map(([name, value]) => ({ name, value }));
     
     // Last 6 months trend
-    const trendData = [];
+    const trendData: TrendPoint[] = [];
     for (let i = 5; i >= 0; i--) {
       const d = subMonths(currentDate, i);
       const start = startOfMonth(d);
@@ -915,7 +939,8 @@ export default function App() {
         name: format(d, 'MMM'),
         Income: income,
         Expenses: expenses,
-        Balance: income - expenses
+        Balance: income - expenses,
+        hasActivity: periodTs.length > 0
       });
     }
 
@@ -1141,8 +1166,8 @@ export default function App() {
                       <XAxis dataKey="name" fontSize={10} axisLine={false} tickLine={false} />
                       <YAxis fontSize={10} axisLine={false} tickLine={false} tickFormatter={(v) => `$${v}`} />
                       <Tooltip 
-                        contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
-                        cursor={{ fill: '#F1F5F9' }}
+                        content={<CashFlowTooltip />}
+                        cursor={false}
                       />
                       <Legend iconType="circle" wrapperStyle={{ paddingTop: '20px', fontSize: '10px' }} />
                       <Bar dataKey="Income" fill="#10B981" radius={[4, 4, 0, 0]} />
