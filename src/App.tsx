@@ -512,15 +512,19 @@ export default function App() {
 
   const handleAddOrUpdate = (e: import('react').FormEvent) => {
     e.preventDefault();
+    const trimmedDescription = description.trim();
+    const trimmedAccountName = accountName.trim();
+    const transactionDescription = isCreditCard
+      ? trimmedDescription || trimmedAccountName
+      : trimmedDescription;
     const parsedAmount = amount.trim() ? parseFloat(amount) : 0;
-    if (!description || (!isCreditCard && !amount.trim()) || !Number.isFinite(parsedAmount)) return;
+    if (!transactionDescription || (!isCreditCard && !amount.trim()) || !Number.isFinite(parsedAmount)) return;
 
     const recurringId = editingTransaction?.recurringId || (isRecurring ? crypto.randomUUID() : undefined);
-    const trimmedAccountName = accountName.trim();
 
     const newTransaction: Transaction = {
       id: editingTransaction?.id || crypto.randomUUID(),
-      description,
+      description: transactionDescription,
       amount: parsedAmount,
       category,
       type,
@@ -530,7 +534,7 @@ export default function App() {
       paid,
       notes,
       accountType: isCreditCard ? 'credit_card' : undefined,
-      accountName: isCreditCard ? trimmedAccountName || description : undefined,
+      accountName: isCreditCard ? trimmedAccountName || transactionDescription : undefined,
       statementBalance: isCreditCard ? parseOptionalNumberInput(statementBalance) : undefined,
       currentBalance: isCreditCard ? parseOptionalNumberInput(currentBalance) : undefined,
       minimumPayment: isCreditCard ? parseOptionalNumberInput(minimumPayment) : undefined,
@@ -547,14 +551,14 @@ export default function App() {
           if (t.recurringId === recurringId) {
             return {
               ...t,
-              description,
+              description: transactionDescription,
               amount: parsedAmount,
               category,
               type,
               notes,
               isRecurring: true, // Keep it recurring
               accountType: isCreditCard ? 'credit_card' : undefined,
-              accountName: isCreditCard ? trimmedAccountName || description : undefined,
+              accountName: isCreditCard ? trimmedAccountName || transactionDescription : undefined,
               statementBalance: isCreditCard ? parseOptionalNumberInput(statementBalance) : undefined,
               currentBalance: isCreditCard ? parseOptionalNumberInput(currentBalance) : undefined,
               minimumPayment: isCreditCard ? parseOptionalNumberInput(minimumPayment) : undefined,
@@ -1435,7 +1439,7 @@ export default function App() {
             <div className="flex flex-col gap-1 col-span-2">
               <label className="text-[9px] uppercase font-bold tracking-wider text-slate-500">Description / Payee</label>
               <input 
-                required
+                required={!isCreditCard}
                 type="text" 
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
@@ -1588,6 +1592,7 @@ export default function App() {
               <div className="flex flex-col gap-1 col-span-2">
                 <label className="text-[9px] uppercase font-bold tracking-wider text-slate-500">Card Name</label>
                 <input
+                  required
                   type="text"
                   value={accountName}
                   onChange={(e) => setAccountName(e.target.value)}
