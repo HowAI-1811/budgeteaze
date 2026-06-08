@@ -512,7 +512,8 @@ export default function App() {
 
   const handleAddOrUpdate = (e: import('react').FormEvent) => {
     e.preventDefault();
-    if (!description || !amount) return;
+    const parsedAmount = amount.trim() ? parseFloat(amount) : 0;
+    if (!description || (!isCreditCard && !amount.trim()) || !Number.isFinite(parsedAmount)) return;
 
     const recurringId = editingTransaction?.recurringId || (isRecurring ? crypto.randomUUID() : undefined);
     const trimmedAccountName = accountName.trim();
@@ -520,7 +521,7 @@ export default function App() {
     const newTransaction: Transaction = {
       id: editingTransaction?.id || crypto.randomUUID(),
       description,
-      amount: parseFloat(amount),
+      amount: parsedAmount,
       category,
       type,
       date,
@@ -547,7 +548,7 @@ export default function App() {
             return {
               ...t,
               description,
-              amount: parseFloat(amount),
+              amount: parsedAmount,
               category,
               type,
               notes,
@@ -1476,9 +1477,11 @@ export default function App() {
               </select>
             </div>
             <div className="flex flex-col gap-1">
-              <label className="text-[9px] uppercase font-bold tracking-wider text-slate-500">Amount</label>
+              <label className="text-[9px] uppercase font-bold tracking-wider text-slate-500">
+                {isCreditCard ? 'Payment' : 'Amount'}
+              </label>
               <input 
-                required
+                required={!isCreditCard}
                 type="number" 
                 step="0.01"
                 value={amount}
@@ -1644,6 +1647,18 @@ export default function App() {
                   className="border border-slate-200 p-2 text-xs font-mono outline-none focus:bg-blue-50 focus:border-blue-500 rounded transition-all"
                   placeholder="0.00"
                 />
+              </div>
+              <div className="flex items-end">
+                <button
+                  type="submit"
+                  className={cn(
+                    "flex w-full items-center justify-center gap-2 bg-slate-900 text-white text-[11px] uppercase tracking-widest font-bold py-2.5 transition-all shadow-sm active:translate-y-0.5 rounded hover:bg-slate-800",
+                    editingTransaction && "bg-blue-700 hover:bg-blue-800"
+                  )}
+                >
+                  <CreditCard className="w-3.5 h-3.5" />
+                  {editingTransaction ? 'Update Card' : 'Save Card'}
+                </button>
               </div>
             </div>
           )}
