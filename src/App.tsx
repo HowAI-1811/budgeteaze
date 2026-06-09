@@ -29,12 +29,14 @@ import {
   Upload,
   CheckCircle2,
   Circle,
-  CreditCard,
+  CreditCard as CreditCardIcon,
   Repeat2,
   Globe,
   Pause,
   Play,
-  Ban
+  Ban,
+  AlertTriangle,
+  Wallet
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -52,7 +54,7 @@ import {
   Legend
 } from 'recharts';
 import { cn } from './lib/utils';
-import { Transaction, TransactionType, Subscription, SubscriptionStatus, BillingCycle } from './types';
+import { Transaction, TransactionType, Subscription, SubscriptionStatus, BillingCycle, CreditCard, CardSubscription, CardTransaction, CardNetwork } from './types';
 import {
   SUBSCRIPTIONS_STORAGE_KEY,
   loadSubscriptions,
@@ -67,6 +69,28 @@ import {
   sanitizeSubscription,
   type SubscriptionInput,
 } from './lib/subscriptions';
+import {
+  loadCreditCards,
+  saveCreditCards,
+  loadCardSubscriptions,
+  saveCardSubscriptions,
+  loadCardTransactions,
+  saveCardTransactions,
+  createCreditCard,
+  touchCreditCard,
+  tombstoneCreditCard,
+  createCardTransaction,
+  isLive,
+  getUtilization,
+  getAvailableCredit,
+  getDaysUntilDue,
+  isCardSubscriptionPosted,
+  sanitizeCreditCard,
+  sanitizeCardSubscription,
+  sanitizeCardTransaction,
+  type CreditCardInput,
+  type CardTransactionInput,
+} from './lib/creditCards';
 
 const STORAGE_KEY = 'cyclebudget_data';
 const CATEGORY_STORAGE_KEY = 'cyclebudget_categories';
@@ -301,6 +325,28 @@ const getCategoriesFromBackup = (backup: unknown, transactions: Transaction[]): 
   return Array.from(new Set(transactions.map(transaction => transaction.category?.trim()).filter(Boolean) as string[])).sort();
 };
 
+type MigratedBackup = {
+  creditCards: unknown[];
+  cardSubscriptions: unknown[];
+  cardTransactions: unknown[];
+};
+
+const asArray = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
+
+/**
+ * Normalize a backup to the current shape regardless of its `version`.
+ * Non-destructive: v1 (transactions only) and v2 (adds subscriptions) simply
+ * yield empty credit-card arrays. v3+ carries the card entities through.
+ */
+const migrateBackup = (backup: unknown): MigratedBackup => {
+  const b = (backup && typeof backup === 'object' ? backup : {}) as Record<string, unknown>;
+  return {
+    creditCards: asArray(b.creditCards),
+    cardSubscriptions: asArray(b.cardSubscriptions),
+    cardTransactions: asArray(b.cardTransactions),
+  };
+};
+
 export default function App() {
   const [activeView, setActiveView] = useState<ViewType>('ledger');
   const [transactions, setTransactions] = useState<Transaction[]>(() => {
@@ -313,6 +359,11 @@ export default function App() {
   });
   // Raw list includes soft-deleted tombstones (kept for future sync).
   const [subscriptions, setSubscriptions] = useState<Subscription[]>(() => loadSubscriptions());
+
+  // Credit card entities (raw lists include tombstones).
+  const [creditCards, setCreditCards] = useState<CreditCard[]>(() => loadCreditCards());
+  const [cardSubscriptions, setCardSubscriptions] = useState<CardSubscription[]>(() => loadCardSubscriptions());
+  const [cardTransactions, setCardTransactions] = useState<CardTransaction[]>(() => loadCardTransactions());
 
   const [currentDate, setCurrentDate] = useState(new Date());
   const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
@@ -350,6 +401,69 @@ export default function App() {
   useEffect(() => {
     saveSubscriptions(subscriptions);
   }, [subscriptions]);
+
+  useEffect(() => {
+    saveCreditCards(creditCards);
+  }, [creditCards]);
+
+  useEffect(() => {
+    saveCardSubscriptions(cardSubscriptions);
+  }, [cardSubscriptions]);
+
+  useEffect(() => {
+    saveCardTransactions(cardTransactions);
+  }, [cardTransactions]);
+
+  // Live (non-tombstoned) credit card entities for the dashboard.
+  const visibleCreditCards = useMemo(
+    () => creditCards.filter(isLive),
+    [creditCards],
+  );
+  const visibleCardSubscriptions = useMemo(
+    () => cardSubscriptions.filter(isLive),
+    [cardSubscriptions],
+  );
+  const visibleCardTransactions = useMemo(
+    () => cardTransactions.filter(isLive),
+    [cardTransactions],
+  );
+
+  // ── Credit card mutations ─────────────────────────────────────────────────
+  const addCreditCard = (input: CreditCardInput) => {
+    setCreditCards(prev => [...prev, createCreditCard(input)]);
+  };
+  const updateCreditCard = (id: string, changes: Partial<CreditCard>) => {
+    setCreditCards(prev =>
+      prev.map(c => (c.id === id ? touchCreditCard(c, changes) : c)),
+    );
+  };
+  const deleteCreditCard = (id: string) => {
+    setCreditCards(prev =>
+      prev.map(c => (c.id === id ? tombstoneCreditCard(c) : c)),
+    );
+  };
+  const addCardTransaction = (input: CardTransactionInput) => {
+    setCardTransactions(prev => [...prev, createCardTransaction(input)]);
+  };
+  // Records a payment: reduces the card balance and logs a negative charge.
+  // Does NOT create a budget transaction (handled externally via bill pay).
+  const logCardPayment = (cardId: string, amount: number, date: string) => {
+    addCardTransaction({
+      cardId,
+      description: 'Payment',
+      amount: -Math.abs(amount),
+      date,
+      category: 'Payment',
+      posted: true,
+    });
+    setCreditCards(prev =>
+      prev.map(c =>
+        c.id === cardId
+          ? touchCreditCard(c, { balance: Math.max(c.balance - Math.abs(amount), 0) })
+          : c,
+      ),
+    );
+  };
 
   // Live (non-tombstoned) subscriptions — what every view and the injection
   // logic should operate on. The raw `subscriptions` array is only for
@@ -753,11 +867,14 @@ export default function App() {
 
   const handleExportJSON = () => {
     const backup = {
-      version: 2,
+      version: 3,
       exportedAt: new Date().toISOString(),
       categories,
       subscriptions,
       transactions,
+      creditCards,
+      cardSubscriptions,
+      cardTransactions,
     };
 
     const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json;charset=utf-8;' });
@@ -805,8 +922,28 @@ export default function App() {
         if (sub) importedSubscriptions.push(sub);
       }
 
+      // Credit card entities arrive in v3+ backups. migrateBackup() back-fills
+      // them as empty for older (v1/v2) files; a single bad record is skipped
+      // rather than rejecting the whole file.
+      const migrated = migrateBackup(backup);
+      const importedCreditCards: CreditCard[] = [];
+      for (const item of migrated.creditCards) {
+        const card = sanitizeCreditCard(item);
+        if (card) importedCreditCards.push(card);
+      }
+      const importedCardSubscriptions: CardSubscription[] = [];
+      for (const item of migrated.cardSubscriptions) {
+        const sub = sanitizeCardSubscription(item);
+        if (sub) importedCardSubscriptions.push(sub);
+      }
+      const importedCardTransactions: CardTransaction[] = [];
+      for (const item of migrated.cardTransactions) {
+        const txn = sanitizeCardTransaction(item);
+        if (txn) importedCardTransactions.push(txn);
+      }
+
       const shouldReplace = confirm(
-        `Import ${importedTransactions.length} transactions, ${importedCategories.length} categories, and ${importedSubscriptions.length} subscriptions?\nThis will replace your current saved data.`
+        `Import ${importedTransactions.length} transactions, ${importedCategories.length} categories, ${importedSubscriptions.length} subscriptions, and ${importedCreditCards.length} credit cards?\nThis will replace your current saved data.`
       );
 
       if (shouldReplace) {
@@ -819,6 +956,9 @@ export default function App() {
         setTransactions(deduped);
         setCategories(importedCategories);
         setSubscriptions(importedSubscriptions);
+        setCreditCards(importedCreditCards);
+        setCardSubscriptions(importedCardSubscriptions);
+        setCardTransactions(importedCardTransactions);
         resetForm();
         // Brief confirmation so the user knows import succeeded
         setTimeout(() =>
@@ -990,7 +1130,7 @@ export default function App() {
                   activeView === 'creditCards' ? "bg-white text-blue-600 shadow-sm" : "text-slate-500 hover:text-slate-900"
                 )}
               >
-                <CreditCard className="w-3.5 h-3.5" />
+                <CreditCardIcon className="w-3.5 h-3.5" />
                 Cards
               </button>
               <button 
@@ -1260,14 +1400,33 @@ export default function App() {
             )}
           </div>
         ) : activeView === 'creditCards' ? (
-          <CreditCardsView
-            summaries={creditCardSummaries}
-            onEdit={(transaction) => {
-              setActiveView('ledger');
-              editTransaction(transaction);
-            }}
-            onTogglePaid={togglePaid}
-          />
+          <div className="h-full overflow-y-auto animate-in fade-in duration-500">
+            <CreditCardDashboard
+              cards={visibleCreditCards}
+              cardSubscriptions={visibleCardSubscriptions}
+              cardTransactions={visibleCardTransactions}
+              categories={categories}
+              currentDate={currentDate}
+              onAddCard={addCreditCard}
+              onUpdateCard={updateCreditCard}
+              onDeleteCard={deleteCreditCard}
+              onAddTransaction={addCardTransaction}
+              onLogPayment={logCardPayment}
+              onManageSubscriptions={() => setActiveView('subscriptions')}
+              embedded
+            />
+            {creditCardSummaries.length > 0 && (
+              <CreditCardsView
+                summaries={creditCardSummaries}
+                onEdit={(transaction) => {
+                  setActiveView('ledger');
+                  editTransaction(transaction);
+                }}
+                onTogglePaid={togglePaid}
+                embedded
+              />
+            )}
+          </div>
         ) : activeView === 'recurring' ? (
           <div className="h-full overflow-y-auto p-8 animate-in slide-in-from-right duration-500">
              <div className="max-w-4xl mx-auto space-y-6">
@@ -1355,11 +1514,13 @@ export default function App() {
           <SubscriptionsView
             subscriptions={visibleSubscriptions}
             categories={categories}
+            creditCards={visibleCreditCards}
             currentDate={currentDate}
             onAdd={addSubscription}
             onUpdate={updateSubscription}
             onDelete={deleteSubscription}
             onStatusChange={changeSubscriptionStatus}
+            onManageCards={() => setActiveView('creditCards')}
           />
         ) : (
           <div className="h-full overflow-y-auto p-8 animate-in slide-in-from-right duration-500">
@@ -1514,7 +1675,7 @@ export default function App() {
                 )}
                 title={isCreditCard ? "Credit card details enabled" : "Track credit card details"}
               >
-                <CreditCard className="w-4 h-4" />
+                <CreditCardIcon className="w-4 h-4" />
               </button>
             </div>
             <div className="flex flex-col justify-center items-center gap-1 pb-1">
@@ -1661,7 +1822,7 @@ export default function App() {
                     editingTransaction && "bg-blue-700 hover:bg-blue-800"
                   )}
                 >
-                  <CreditCard className="w-3.5 h-3.5" />
+                  <CreditCardIcon className="w-3.5 h-3.5" />
                   {editingTransaction ? 'Update Card' : 'Save Card'}
                 </button>
               </div>
@@ -1677,10 +1838,12 @@ function CreditCardsView({
   summaries,
   onEdit,
   onTogglePaid,
+  embedded = false,
 }: {
   summaries: CreditCardSummary[];
   onEdit: (transaction: Transaction) => void;
   onTogglePaid: (id: string) => void;
+  embedded?: boolean;
 }) {
   const totalCurrentBalance = summaries.reduce((sum, card) => sum + card.currentBalance, 0);
   const totalMinimumPayment = summaries.reduce((sum, card) => sum + card.minimumPayment, 0);
@@ -1689,12 +1852,12 @@ function CreditCardsView({
   const overallUtilization = totalCreditLimit > 0 ? totalCurrentBalance / totalCreditLimit : null;
 
   return (
-    <div className="h-full overflow-y-auto p-8 animate-in fade-in duration-500">
+    <div className={cn(embedded ? 'px-8 pb-8' : 'h-full overflow-y-auto p-8 animate-in fade-in duration-500')}>
       <div className="max-w-7xl mx-auto space-y-6">
         <div className="flex items-end justify-between gap-6">
           <div>
-            <h2 className="font-serif italic text-3xl tracking-tight text-slate-900 border-b-2 border-blue-600 inline-block mb-1">Credit Cards</h2>
-            <p className="text-xs text-slate-500 font-medium">Track balances, due dates, payment plans, and utilization for this month.</p>
+            <h2 className="font-serif italic text-3xl tracking-tight text-slate-900 border-b-2 border-blue-600 inline-block mb-1">{embedded ? 'Bill Pay (from ledger)' : 'Credit Cards'}</h2>
+            <p className="text-xs text-slate-500 font-medium">{embedded ? 'Monthly card payments tracked as recurring ledger transactions.' : 'Track balances, due dates, payment plans, and utilization for this month.'}</p>
           </div>
         </div>
 
@@ -1808,6 +1971,553 @@ function CreditCardsView({
   );
 }
 
+const CARD_NETWORKS: CardNetwork[] = ['Visa', 'Mastercard', 'Amex', 'Discover', 'Other'];
+const CARD_GRADIENTS = ['#1e3a8a', '#7c3aed', '#0f766e', '#b91c1c', '#9a3412', '#334155'];
+
+type CardFormState = {
+  name: string;
+  last4: string;
+  network: CardNetwork;
+  limit: string;
+  balance: string;
+  minDue: string;
+  dueDate: string;
+  stmtCloseDate: string;
+  apr: string;
+  color: string;
+};
+
+const emptyCardForm = (): CardFormState => ({
+  name: '',
+  last4: '',
+  network: 'Visa',
+  limit: '',
+  balance: '',
+  minDue: '',
+  dueDate: '',
+  stmtCloseDate: '',
+  apr: '',
+  color: CARD_GRADIENTS[0],
+});
+
+const fmtDate = (iso?: string) => (iso ? format(parseISO(iso), 'MMM d') : '--');
+
+function CreditCardDashboard({
+  cards,
+  cardSubscriptions,
+  cardTransactions,
+  categories,
+  currentDate,
+  onAddCard,
+  onUpdateCard,
+  onDeleteCard,
+  onAddTransaction,
+  onLogPayment,
+  onManageSubscriptions,
+  embedded = false,
+}: {
+  cards: CreditCard[];
+  cardSubscriptions: CardSubscription[];
+  cardTransactions: CardTransaction[];
+  categories: string[];
+  currentDate: Date;
+  onAddCard: (input: CreditCardInput) => void;
+  onUpdateCard: (id: string, changes: Partial<CreditCard>) => void;
+  onDeleteCard: (id: string) => void;
+  onAddTransaction: (input: CardTransactionInput) => void;
+  onLogPayment: (cardId: string, amount: number, date: string) => void;
+  onManageSubscriptions: () => void;
+  embedded?: boolean;
+}) {
+  const [selectedId, setSelectedId] = useState<string | null>(cards[0]?.id ?? null);
+  const [showCardModal, setShowCardModal] = useState(false);
+  const [editingCardId, setEditingCardId] = useState<string | null>(null);
+  const [cardForm, setCardForm] = useState<CardFormState>(emptyCardForm);
+  const [showChargeModal, setShowChargeModal] = useState(false);
+  const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [balanceDraft, setBalanceDraft] = useState<string | null>(null);
+
+  const today = format(new Date(), 'yyyy-MM-dd');
+  const [chargeForm, setChargeForm] = useState({ description: '', amount: '', date: today, category: '', posted: true });
+  const [paymentForm, setPaymentForm] = useState({ amount: '', date: today });
+
+  const selected = cards.find(c => c.id === selectedId) ?? cards[0] ?? null;
+
+  const setCardField = <K extends keyof CardFormState>(key: K, value: CardFormState[K]) =>
+    setCardForm(prev => ({ ...prev, [key]: value }));
+
+  const openAddCard = () => {
+    setEditingCardId(null);
+    setCardForm(emptyCardForm());
+    setShowCardModal(true);
+  };
+
+  const openEditCard = (card: CreditCard) => {
+    setEditingCardId(card.id);
+    setCardForm({
+      name: card.name,
+      last4: card.last4,
+      network: card.network,
+      limit: card.limit ? String(card.limit) : '',
+      balance: card.balance ? String(card.balance) : '',
+      minDue: card.minDue ? String(card.minDue) : '',
+      dueDate: card.dueDate ? card.dueDate.slice(0, 10) : '',
+      stmtCloseDate: card.stmtCloseDate ? card.stmtCloseDate.slice(0, 10) : '',
+      apr: card.apr !== undefined ? String(card.apr) : '',
+      color: card.color || CARD_GRADIENTS[0],
+    });
+    setShowCardModal(true);
+  };
+
+  const submitCard = () => {
+    const name = cardForm.name.trim();
+    const limit = parseFloat(cardForm.limit);
+    const balance = parseFloat(cardForm.balance);
+    if (!name || !Number.isFinite(limit) || !Number.isFinite(balance)) return;
+    const input: CreditCardInput = {
+      name,
+      last4: cardForm.last4.replace(/\D/g, '').slice(-4),
+      network: cardForm.network,
+      limit,
+      balance,
+      minDue: parseFloat(cardForm.minDue) || 0,
+      dueDate: cardForm.dueDate,
+      stmtCloseDate: cardForm.stmtCloseDate,
+      apr: cardForm.apr.trim() ? parseFloat(cardForm.apr) : undefined,
+      color: cardForm.color,
+    };
+    if (editingCardId) {
+      onUpdateCard(editingCardId, input);
+    } else {
+      onAddCard(input);
+    }
+    setShowCardModal(false);
+    setEditingCardId(null);
+  };
+
+  const submitCharge = () => {
+    if (!selected) return;
+    const amount = parseFloat(chargeForm.amount);
+    const description = chargeForm.description.trim();
+    if (!description || !Number.isFinite(amount)) return;
+    onAddTransaction({
+      cardId: selected.id,
+      description,
+      amount,
+      date: chargeForm.date,
+      category: chargeForm.category,
+      posted: chargeForm.posted,
+    });
+    // Logged charges raise the manually-maintained balance.
+    onUpdateCard(selected.id, { balance: selected.balance + amount });
+    setChargeForm({ description: '', amount: '', date: today, category: '', posted: true });
+    setShowChargeModal(false);
+  };
+
+  const submitPayment = () => {
+    if (!selected) return;
+    const amount = parseFloat(paymentForm.amount);
+    if (!Number.isFinite(amount) || amount <= 0) return;
+    onLogPayment(selected.id, amount, paymentForm.date);
+    setPaymentForm({ amount: '', date: today });
+    setShowPaymentModal(false);
+  };
+
+  const commitBalance = () => {
+    if (selected && balanceDraft !== null) {
+      const next = parseFloat(balanceDraft);
+      if (Number.isFinite(next)) onUpdateCard(selected.id, { balance: next });
+    }
+    setBalanceDraft(null);
+  };
+
+  const subsForCard = selected
+    ? cardSubscriptions.filter(s => s.cardId === selected.id && s.status === 'active')
+    : [];
+  const subsTotal = subsForCard.reduce((sum, s) => sum + s.amount, 0);
+
+  const cycleCharges = selected
+    ? cardTransactions
+        .filter(t => t.cardId === selected.id)
+        .sort((a, b) => parseISO(b.date).getTime() - parseISO(a.date).getTime())
+    : [];
+
+  const utilization = selected ? getUtilization(selected) : null;
+  const daysUntilDue = selected ? getDaysUntilDue(selected) : null;
+  const dueSoon = daysUntilDue !== null && daysUntilDue <= 7;
+
+  const inputClass = 'border border-slate-200 p-2 text-xs rounded outline-none focus:bg-blue-50 focus:border-blue-500';
+  const labelClass = 'text-[10px] uppercase font-bold tracking-wider text-slate-500';
+
+  return (
+    <div className={cn(embedded ? 'px-8 pt-8 pb-2' : 'h-full overflow-y-auto p-8 animate-in fade-in duration-500')}>
+      <div className="max-w-5xl mx-auto space-y-6">
+        <div className="flex items-end justify-between gap-6">
+          <div>
+            <h2 className="font-serif italic text-3xl tracking-tight text-slate-900 border-b-2 border-blue-600 inline-block mb-1">Card Dashboard</h2>
+            <p className="text-xs text-slate-500 font-medium">Track what's on each card — balance, subscriptions, and charges.</p>
+          </div>
+          <button
+            onClick={onManageSubscriptions}
+            className="text-[11px] uppercase tracking-widest font-bold text-blue-600 hover:text-blue-800 transition-colors"
+          >
+            Manage Subscriptions →
+          </button>
+        </div>
+
+        {/* Selector pills */}
+        <div className="flex flex-wrap items-center gap-2">
+          {cards.map(card => (
+            <button
+              key={card.id}
+              onClick={() => setSelectedId(card.id)}
+              className={cn(
+                'rounded-full border px-4 py-1.5 text-[11px] font-bold uppercase tracking-wider transition-all',
+                selected?.id === card.id
+                  ? 'border-slate-900 bg-slate-900 text-white shadow-sm'
+                  : 'border-slate-200 bg-white text-slate-600 hover:border-slate-400'
+              )}
+            >
+              {card.name}{card.last4 ? ` ••${card.last4}` : ''}
+            </button>
+          ))}
+          <button
+            onClick={openAddCard}
+            className="rounded-full border border-dashed border-slate-300 px-4 py-1.5 text-[11px] font-bold uppercase tracking-wider text-blue-600 hover:bg-blue-50 transition-colors flex items-center gap-1"
+          >
+            <Plus className="w-3 h-3" /> Add Card
+          </button>
+        </div>
+
+        {!selected ? (
+          <div className="rounded-xl border border-dashed border-slate-300 bg-white p-12 text-center">
+            <CreditCardIcon className="w-8 h-8 text-slate-300 mx-auto mb-3" />
+            <p className="text-sm font-serif italic text-slate-400">No cards yet. Add one to start tracking balances and charges.</p>
+          </div>
+        ) : (
+          <>
+            {/* Card visual */}
+            <div
+              className="rounded-2xl p-6 text-white shadow-lg relative overflow-hidden"
+              style={{ background: `linear-gradient(135deg, ${selected.color || CARD_GRADIENTS[0]}, #0f172a)` }}
+            >
+              <div className="flex justify-between items-start">
+                <div>
+                  <p className="text-[10px] uppercase tracking-[0.3em] opacity-70 font-bold">{selected.network}</p>
+                  <p className="font-serif italic text-2xl mt-1">{selected.name}</p>
+                </div>
+                <div className="flex gap-1">
+                  <button onClick={() => openEditCard(selected)} className="p-1.5 rounded hover:bg-white/15 transition-colors" title="Edit card">
+                    <Edit2 className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (confirm(`Delete card "${selected.name}"? Its subscriptions and charges will remain but become unlinked.`)) {
+                        onDeleteCard(selected.id);
+                        setSelectedId(null);
+                      }
+                    }}
+                    className="p-1.5 rounded hover:bg-white/15 transition-colors"
+                    title="Delete card"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+              <div className="flex justify-between items-end mt-8">
+                <p className="font-mono text-lg tracking-widest">•••• •••• •••• {selected.last4 || '••••'}</p>
+                <div className="text-right">
+                  <p className="text-[9px] uppercase tracking-widest opacity-60 font-bold">Stmt Close</p>
+                  <p className="font-mono text-xs">{fmtDate(selected.stmtCloseDate)}</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Due banner */}
+            <div className={cn(
+              'flex items-center justify-between rounded-lg border px-4 py-3',
+              dueSoon ? 'border-rose-200 bg-rose-50' : 'border-slate-200 bg-white'
+            )}>
+              <div className="flex items-center gap-2">
+                {dueSoon && <AlertTriangle className="w-4 h-4 text-rose-600" />}
+                <span className={cn('text-xs font-semibold', dueSoon ? 'text-rose-700' : 'text-slate-600')}>
+                  Payment due {fmtDate(selected.dueDate)}
+                  {daysUntilDue !== null && (
+                    <span className="font-mono ml-2">
+                      {daysUntilDue < 0 ? `${Math.abs(daysUntilDue)}d overdue` : daysUntilDue === 0 ? 'due today' : `in ${daysUntilDue}d`}
+                    </span>
+                  )}
+                </span>
+              </div>
+              <button
+                onClick={() => { setPaymentForm({ amount: selected.minDue ? String(selected.minDue) : '', date: today }); setShowPaymentModal(true); }}
+                className="flex items-center gap-1.5 rounded bg-slate-900 px-3 py-1.5 text-[10px] uppercase tracking-widest font-bold text-white hover:bg-slate-800 transition-colors"
+              >
+                <Wallet className="w-3 h-3" /> Log Payment
+              </button>
+            </div>
+
+            {/* Stats row */}
+            <div className="grid grid-cols-3 gap-4">
+              <div className="border border-slate-200 bg-white p-4 rounded-lg shadow-sm">
+                <p className="text-[9px] uppercase font-bold tracking-widest text-slate-500 mb-1">Balance</p>
+                {balanceDraft !== null ? (
+                  <input
+                    autoFocus
+                    type="number"
+                    step="0.01"
+                    value={balanceDraft}
+                    onChange={e => setBalanceDraft(e.target.value)}
+                    onBlur={commitBalance}
+                    onKeyDown={e => { if (e.key === 'Enter') commitBalance(); if (e.key === 'Escape') setBalanceDraft(null); }}
+                    className="font-mono text-xl font-bold text-rose-600 w-full outline-none border-b border-rose-300"
+                  />
+                ) : (
+                  <button onClick={() => setBalanceDraft(String(selected.balance))} className="font-mono text-xl font-bold text-rose-600 hover:underline" title="Click to update balance">
+                    ${formatMoney(selected.balance)}
+                  </button>
+                )}
+              </div>
+              <div className="border border-slate-200 bg-white p-4 rounded-lg shadow-sm">
+                <p className="text-[9px] uppercase font-bold tracking-widest text-slate-500 mb-1">Available</p>
+                <p className="font-mono text-xl font-bold text-emerald-600">${formatMoney(getAvailableCredit(selected))}</p>
+              </div>
+              <div className="border border-slate-200 bg-white p-4 rounded-lg shadow-sm">
+                <p className="text-[9px] uppercase font-bold tracking-widest text-slate-500 mb-1">Min Due</p>
+                <p className="font-mono text-xl font-bold text-amber-600">${formatMoney(selected.minDue)}</p>
+              </div>
+            </div>
+
+            {/* Utilization bar */}
+            <div className="border border-slate-200 bg-white p-4 rounded-lg shadow-sm">
+              <div className="flex justify-between items-center mb-2">
+                <span className="text-[9px] uppercase font-bold tracking-widest text-slate-500">Utilization</span>
+                <span className={cn('font-mono text-xs font-bold', utilization !== null && utilization >= 0.3 ? 'text-rose-600' : 'text-emerald-600')}>
+                  {utilization === null ? '--' : `${Math.round(utilization * 100)}%`}
+                </span>
+              </div>
+              <div className="h-3 rounded-full bg-slate-100 overflow-hidden">
+                <div
+                  className="h-full rounded-full transition-all"
+                  style={{
+                    width: `${Math.min((utilization ?? 0) * 100, 100)}%`,
+                    background: utilization !== null && utilization >= 0.3
+                      ? 'linear-gradient(90deg, #f59e0b, #e11d48)'
+                      : 'linear-gradient(90deg, #34d399, #10b981)',
+                  }}
+                />
+              </div>
+              <p className="text-[10px] text-slate-400 mt-1.5 font-mono">Limit ${formatMoney(selected.limit)}</p>
+            </div>
+
+            {/* Subscriptions this cycle */}
+            <div className="border border-slate-200 bg-white rounded-lg shadow-sm overflow-hidden">
+              <div className="flex justify-between items-center px-4 py-3 border-b border-slate-100">
+                <h3 className="text-[10px] uppercase font-bold tracking-widest text-slate-500">Subscriptions This Cycle</h3>
+                <span className="font-mono text-xs font-bold text-violet-600">${formatMoney(subsTotal)}/mo</span>
+              </div>
+              {subsForCard.length === 0 ? (
+                <p className="p-6 text-center text-xs text-slate-400 italic font-serif">
+                  No active subscriptions on this card. <button onClick={onManageSubscriptions} className="text-blue-600 not-italic font-bold hover:underline">Add one →</button>
+                </p>
+              ) : (
+                <ul className="divide-y divide-slate-100">
+                  {subsForCard.map(sub => {
+                    const posted = isCardSubscriptionPosted(sub, currentDate);
+                    return (
+                      <li key={sub.id} className="flex items-center justify-between px-4 py-3">
+                        <div className="flex items-center gap-2">
+                          <span className="font-sans font-bold text-slate-900 text-xs">{sub.name}</span>
+                          <span className={cn(
+                            'inline-flex items-center rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider',
+                            posted ? 'border-slate-200 bg-slate-50 text-slate-500' : 'border-blue-200 bg-blue-50 text-blue-700'
+                          )}>
+                            {posted ? 'Posted' : 'Upcoming'}
+                          </span>
+                        </div>
+                        <div className="text-right">
+                          <span className="font-mono text-xs font-bold text-slate-900">${formatMoney(sub.amount)}</span>
+                          <span className="font-mono text-[10px] text-slate-400 ml-2">day {sub.billingDay}</span>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+
+            {/* Ad hoc charges */}
+            <div className="border border-slate-200 bg-white rounded-lg shadow-sm overflow-hidden">
+              <div className="flex justify-between items-center px-4 py-3 border-b border-slate-100">
+                <h3 className="text-[10px] uppercase font-bold tracking-widest text-slate-500">Charges & Payments</h3>
+                <button
+                  onClick={() => setShowChargeModal(true)}
+                  className="flex items-center gap-1 text-[10px] uppercase tracking-widest font-bold text-blue-600 hover:text-blue-800 transition-colors"
+                >
+                  <Plus className="w-3 h-3" /> Log Charge
+                </button>
+              </div>
+              {cycleCharges.length === 0 ? (
+                <p className="p-6 text-center text-xs text-slate-400 italic font-serif">No charges logged yet.</p>
+              ) : (
+                <ul className="divide-y divide-slate-100">
+                  {cycleCharges.map(txn => (
+                    <li key={txn.id} className="flex items-center justify-between px-4 py-3">
+                      <div className="flex flex-col">
+                        <span className="font-sans font-bold text-slate-900 text-xs">{txn.description}</span>
+                        <span className="font-mono text-[10px] text-slate-400">{fmtDate(txn.date)}{txn.category ? ` · ${txn.category}` : ''}{!txn.posted ? ' · pending' : ''}</span>
+                      </div>
+                      <span className={cn('font-mono text-xs font-bold', txn.amount < 0 ? 'text-emerald-600' : 'text-slate-900')}>
+                        {txn.amount < 0 ? '-' : ''}${formatMoney(Math.abs(txn.amount))}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Add/Edit Card modal */}
+      {showCardModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4" onClick={() => setShowCardModal(false)}>
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl p-6 space-y-4" onClick={e => e.stopPropagation()}>
+            <div className="flex justify-between items-center">
+              <h3 className="text-xs uppercase font-bold tracking-widest text-slate-500">{editingCardId ? 'Edit Card' : 'Add Card'}</h3>
+              <button onClick={() => setShowCardModal(false)} className="text-slate-400 hover:text-slate-700"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+              <label className="flex flex-col gap-1 col-span-2 md:col-span-1">
+                <span className={labelClass}>Name *</span>
+                <input value={cardForm.name} onChange={e => setCardField('name', e.target.value)} className={inputClass} placeholder="Chase Disney" />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className={labelClass}>Last 4</span>
+                <input value={cardForm.last4} onChange={e => setCardField('last4', e.target.value)} maxLength={4} className={inputClass} placeholder="1234" />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className={labelClass}>Network</span>
+                <select value={cardForm.network} onChange={e => setCardField('network', e.target.value as CardNetwork)} className={inputClass}>
+                  {CARD_NETWORKS.map(n => <option key={n} value={n}>{n}</option>)}
+                </select>
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className={labelClass}>Credit Limit *</span>
+                <input type="number" step="0.01" value={cardForm.limit} onChange={e => setCardField('limit', e.target.value)} className={inputClass} placeholder="5000" />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className={labelClass}>Current Balance *</span>
+                <input type="number" step="0.01" value={cardForm.balance} onChange={e => setCardField('balance', e.target.value)} className={inputClass} placeholder="1200" />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className={labelClass}>Min Due</span>
+                <input type="number" step="0.01" value={cardForm.minDue} onChange={e => setCardField('minDue', e.target.value)} className={inputClass} placeholder="35" />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className={labelClass}>Due Date</span>
+                <input type="date" value={cardForm.dueDate} onChange={e => setCardField('dueDate', e.target.value)} className={inputClass} />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className={labelClass}>Statement Close</span>
+                <input type="date" value={cardForm.stmtCloseDate} onChange={e => setCardField('stmtCloseDate', e.target.value)} className={inputClass} />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className={labelClass}>APR (optional)</span>
+                <input type="number" step="0.01" value={cardForm.apr} onChange={e => setCardField('apr', e.target.value)} className={inputClass} placeholder="24.99" />
+              </label>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className={labelClass}>Color</span>
+              <div className="flex gap-1.5">
+                {CARD_GRADIENTS.map(c => (
+                  <button key={c} type="button" onClick={() => setCardField('color', c)} className={cn('w-5 h-5 rounded-full border-2 transition-transform', cardForm.color === c ? 'border-slate-900 scale-110' : 'border-transparent')} style={{ backgroundColor: c }} />
+                ))}
+              </div>
+            </div>
+            <div className="flex gap-3 pt-2">
+              <button onClick={submitCard} className="px-5 bg-blue-600 text-white text-[11px] uppercase tracking-widest font-bold py-2.5 hover:bg-blue-700 rounded transition-colors">
+                {editingCardId ? 'Save Changes' : 'Add Card'}
+              </button>
+              <button onClick={() => setShowCardModal(false)} className="px-5 border border-slate-200 text-slate-600 text-[11px] uppercase tracking-widest font-bold py-2.5 hover:bg-slate-50 rounded transition-colors">Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Log Charge modal */}
+      {showChargeModal && selected && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4" onClick={() => setShowChargeModal(false)}>
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6 space-y-4" onClick={e => e.stopPropagation()}>
+            <div className="flex justify-between items-center">
+              <h3 className="text-xs uppercase font-bold tracking-widest text-slate-500">Log Charge · {selected.name}</h3>
+              <button onClick={() => setShowChargeModal(false)} className="text-slate-400 hover:text-slate-700"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <label className="flex flex-col gap-1 col-span-2">
+                <span className={labelClass}>Description *</span>
+                <input value={chargeForm.description} onChange={e => setChargeForm(p => ({ ...p, description: e.target.value }))} className={inputClass} placeholder="Amazon order" />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className={labelClass}>Amount *</span>
+                <input type="number" step="0.01" value={chargeForm.amount} onChange={e => setChargeForm(p => ({ ...p, amount: e.target.value }))} className={inputClass} placeholder="42.10" />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className={labelClass}>Date</span>
+                <input type="date" value={chargeForm.date} onChange={e => setChargeForm(p => ({ ...p, date: e.target.value }))} className={inputClass} />
+              </label>
+              <label className="flex flex-col gap-1 col-span-2">
+                <span className={labelClass}>Category</span>
+                <select value={chargeForm.category} onChange={e => setChargeForm(p => ({ ...p, category: e.target.value }))} className={inputClass}>
+                  <option value="">--</option>
+                  {categories.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </label>
+            </div>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <button type="button" onClick={() => setChargeForm(p => ({ ...p, posted: !p.posted }))} className={cn('w-9 h-5 rounded-full transition-colors relative', chargeForm.posted ? 'bg-blue-600' : 'bg-slate-300')}>
+                <span className={cn('absolute top-0.5 w-4 h-4 bg-white rounded-full transition-all', chargeForm.posted ? 'left-[18px]' : 'left-0.5')} />
+              </button>
+              <span className="text-[11px] font-semibold text-slate-600">Posted (confirmed charge)</span>
+            </label>
+            <div className="flex gap-3 pt-2">
+              <button onClick={submitCharge} className="px-5 bg-blue-600 text-white text-[11px] uppercase tracking-widest font-bold py-2.5 hover:bg-blue-700 rounded transition-colors">Log Charge</button>
+              <button onClick={() => setShowChargeModal(false)} className="px-5 border border-slate-200 text-slate-600 text-[11px] uppercase tracking-widest font-bold py-2.5 hover:bg-slate-50 rounded transition-colors">Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Log Payment modal */}
+      {showPaymentModal && selected && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4" onClick={() => setShowPaymentModal(false)}>
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6 space-y-4" onClick={e => e.stopPropagation()}>
+            <div className="flex justify-between items-center">
+              <h3 className="text-xs uppercase font-bold tracking-widest text-slate-500">Log Payment · {selected.name}</h3>
+              <button onClick={() => setShowPaymentModal(false)} className="text-slate-400 hover:text-slate-700"><X className="w-4 h-4" /></button>
+            </div>
+            <p className="text-[11px] text-slate-500">Reduces this card's balance. Does not create a budget transaction — pay externally via bill pay.</p>
+            <div className="grid grid-cols-2 gap-4">
+              <label className="flex flex-col gap-1">
+                <span className={labelClass}>Amount *</span>
+                <input type="number" step="0.01" value={paymentForm.amount} onChange={e => setPaymentForm(p => ({ ...p, amount: e.target.value }))} className={inputClass} placeholder={selected.minDue ? String(selected.minDue) : '0.00'} />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className={labelClass}>Date</span>
+                <input type="date" value={paymentForm.date} onChange={e => setPaymentForm(p => ({ ...p, date: e.target.value }))} className={inputClass} />
+              </label>
+            </div>
+            <div className="flex gap-3 pt-2">
+              <button onClick={submitPayment} className="px-5 bg-slate-900 text-white text-[11px] uppercase tracking-widest font-bold py-2.5 hover:bg-slate-800 rounded transition-colors">Log Payment</button>
+              <button onClick={() => setShowPaymentModal(false)} className="px-5 border border-slate-200 text-slate-600 text-[11px] uppercase tracking-widest font-bold py-2.5 hover:bg-slate-50 rounded transition-colors">Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CyclePane({ 
   title, 
   stats, 
@@ -1853,7 +2563,7 @@ function CyclePane({
       
       <div className="flex-1 overflow-y-auto">
         <table className="w-full text-xs border-collapse">
-          <thead className="sticky top-0 bg-slate-50 z-[5]">
+          <thead className="sticky top-0 bg-slate-50 z-5">
             <tr className="border-b border-slate-200 text-left opacity-60 font-serif italic text-slate-500">
               <th className="p-3 font-normal">Date</th>
               <th className="p-3 font-normal">Description</th>
@@ -2021,6 +2731,7 @@ type SubscriptionFormState = {
   startDate: string;
   trialEndDate: string;
   autoCreateTransaction: boolean;
+  cardId: string;
   url: string;
   notes: string;
   color: string;
@@ -2036,6 +2747,7 @@ const emptySubscriptionForm = (): SubscriptionFormState => ({
   startDate: format(new Date(), 'yyyy-MM-dd'),
   trialEndDate: '',
   autoCreateTransaction: true,
+  cardId: '',
   url: '',
   notes: '',
   color: SUBSCRIPTION_COLORS[0],
@@ -2044,19 +2756,23 @@ const emptySubscriptionForm = (): SubscriptionFormState => ({
 function SubscriptionsView({
   subscriptions,
   categories,
+  creditCards,
   currentDate,
   onAdd,
   onUpdate,
   onDelete,
   onStatusChange,
+  onManageCards,
 }: {
   subscriptions: Subscription[];
   categories: string[];
+  creditCards: CreditCard[];
   currentDate: Date;
   onAdd: (input: SubscriptionInput) => void;
   onUpdate: (id: string, changes: Partial<Subscription>) => void;
   onDelete: (id: string, deleteTransactions?: boolean) => void;
   onStatusChange: (id: string, status: SubscriptionStatus) => void;
+  onManageCards: () => void;
 }) {
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -2083,6 +2799,7 @@ function SubscriptionsView({
       startDate: sub.startDate ? sub.startDate.slice(0, 10) : format(new Date(), 'yyyy-MM-dd'),
       trialEndDate: sub.trialEndDate ? sub.trialEndDate.slice(0, 10) : '',
       autoCreateTransaction: sub.autoCreateTransaction,
+      cardId: sub.cardId || '',
       url: sub.url || '',
       notes: sub.notes || '',
       color: sub.color || SUBSCRIPTION_COLORS[0],
@@ -2107,6 +2824,7 @@ function SubscriptionsView({
       startDate: form.startDate,
       trialEndDate: form.trialEndDate || undefined,
       autoCreateTransaction: form.autoCreateTransaction,
+      cardId: form.cardId || undefined,
       url: form.url.trim() || undefined,
       notes: form.notes.trim() || undefined,
       color: form.color,
@@ -2179,6 +2897,7 @@ function SubscriptionsView({
             <thead className="bg-slate-50 border-b border-slate-200">
               <tr className="text-left text-[10px] uppercase tracking-widest font-bold text-slate-500">
                 <th className="p-4">Service</th>
+                <th className="p-4">Card</th>
                 <th className="p-4">Category</th>
                 <th className="p-4 text-right">Amount</th>
                 <th className="p-4">Cycle</th>
@@ -2191,7 +2910,7 @@ function SubscriptionsView({
             <tbody className="text-xs">
               {subscriptions.length === 0 && (
                 <tr>
-                  <td colSpan={8} className="p-12 text-center text-slate-400 italic font-serif">
+                  <td colSpan={9} className="p-12 text-center text-slate-400 italic font-serif">
                     No subscriptions yet. Add one to start tracking recurring spend.
                   </td>
                 </tr>
@@ -2200,6 +2919,7 @@ function SubscriptionsView({
                 .sort((a, b) => getMonthlyEquivalent(b) - getMonthlyEquivalent(a))
                 .map(sub => {
                   const isTrial = !!sub.trialEndDate && parseISO(sub.trialEndDate) > today;
+                  const linkedCard = sub.cardId ? creditCards.find(c => c.id === sub.cardId) : null;
                   return (
                     <tr key={sub.id} className="border-b border-slate-100 hover:bg-slate-50 transition-colors">
                       <td className="p-4">
@@ -2215,6 +2935,16 @@ function SubscriptionsView({
                             <span className="inline-flex items-center rounded-full border border-cyan-200 bg-cyan-50 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-cyan-700">Trial</span>
                           )}
                         </div>
+                      </td>
+                      <td className="p-4 font-sans text-xs">
+                        {linkedCard ? (
+                          <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 font-bold text-slate-700">
+                            <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: linkedCard.color || '#334155' }} />
+                            {linkedCard.name}{linkedCard.last4 ? ` ••${linkedCard.last4}` : ''}
+                          </span>
+                        ) : (
+                          <span className="text-slate-300">--</span>
+                        )}
                       </td>
                       <td className="p-4 font-sans text-slate-500">{sub.category || '--'}</td>
                       <td className="p-4 text-right font-mono">
@@ -2312,6 +3042,25 @@ function SubscriptionsView({
                 </select>
               </label>
               <label className="flex flex-col gap-1">
+                <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500">Card</span>
+                {creditCards.length === 0 ? (
+                  <button
+                    type="button"
+                    onClick={onManageCards}
+                    className="border border-dashed border-slate-300 p-2 text-xs rounded text-left text-blue-600 hover:bg-blue-50 transition-colors"
+                  >
+                    Add a credit card first →
+                  </button>
+                ) : (
+                  <select value={form.cardId} onChange={e => setField('cardId', e.target.value)} className="border border-slate-200 p-2 text-xs rounded outline-none focus:bg-blue-50 focus:border-blue-500">
+                    <option value="">Not on a tracked card</option>
+                    {creditCards.map(c => (
+                      <option key={c.id} value={c.id}>{c.name}{c.last4 ? ` ••${c.last4}` : ''}</option>
+                    ))}
+                  </select>
+                )}
+              </label>
+              <label className="flex flex-col gap-1">
                 <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500">Status</span>
                 <select value={form.status} onChange={e => setField('status', e.target.value as SubscriptionStatus)} className="border border-slate-200 p-2 text-xs rounded outline-none focus:bg-blue-50 focus:border-blue-500">
                   <option value="active">Active</option>
@@ -2366,6 +3115,10 @@ function SubscriptionsView({
 
             {form.billingDay && parseInt(form.billingDay, 10) > 28 && (
               <p className="text-[10px] text-amber-600 font-semibold">Days 29–31 aren't supported — use 28 to approximate month-end billing.</p>
+            )}
+
+            {form.cardId && (
+              <p className="text-[10px] text-slate-500 font-semibold">Tip: if this subscription also lives in your recurring transactions, remove it there to avoid double-counting — the card's monthly payment already covers it.</p>
             )}
 
             <div className="flex gap-3 pt-2">

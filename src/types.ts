@@ -66,10 +66,58 @@ export interface Subscription extends SyncMeta {
   // Ledger integration
   autoCreateTransaction: boolean; // true → inject a Transaction each billing period
 
+  // Credit card linkage
+  cardId?: string; // FK → CreditCard.id; absent means not charged to a tracked card
+
   // Optional metadata
   url?: string; // management/cancellation URL
   notes?: string;
   color?: string; // hex color token for UI badge
+}
+
+export type CardNetwork = 'Visa' | 'Mastercard' | 'Amex' | 'Discover' | 'Other';
+
+/**
+ * A tracked credit card. Distinct from the bill-pay `Transaction`s in the
+ * ledger (those record the monthly external payment). A `CreditCard` models what
+ * is *on* the card — its balance, limit, and the charges/subscriptions against
+ * it. `balance` is manually maintained for now (see spec §8).
+ */
+export interface CreditCard extends SyncMeta {
+  id: string; // crypto.randomUUID()
+  name: string; // e.g. "Chase Disney"
+  last4: string; // last 4 digits
+  network: CardNetwork;
+  limit: number; // credit limit
+  balance: number; // current balance (manually maintained)
+  minDue: number; // minimum payment due
+  dueDate: string; // ISO date string, e.g. "2026-06-15"
+  stmtCloseDate: string; // ISO date string
+  apr?: number;
+  color?: string; // optional hex for card visual
+}
+
+/** A subscription charged to a specific tracked card. */
+export interface CardSubscription extends SyncMeta {
+  id: string; // crypto.randomUUID()
+  cardId: string; // FK → CreditCard.id
+  name: string; // e.g. "Adobe Creative Cloud"
+  amount: number;
+  billingDay: number; // day of month (1–31)
+  category: string; // maps to an entry in the categories list
+  status: SubscriptionStatus;
+}
+
+/** An ad hoc charge (or payment) recorded against a tracked card. */
+export interface CardTransaction extends SyncMeta {
+  id: string; // crypto.randomUUID()
+  cardId: string; // FK → CreditCard.id
+  description: string;
+  amount: number; // negative for payments
+  date: string; // ISO date string
+  category: string; // maps to an entry in the categories list
+  posted: boolean; // true = confirmed charge, false = pending
+  notes?: string;
 }
 
 export type PaymentCycle = 'first' | 'fifteenth';
