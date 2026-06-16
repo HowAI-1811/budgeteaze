@@ -173,6 +173,7 @@ export const sanitizeSubscription = (value: unknown): Subscription | null => {
     category: isString(s.category) ? s.category : undefined,
     status: s.status as SubscriptionStatus,
     startDate: s.startDate,
+    renewalDate: isString(s.renewalDate) ? s.renewalDate : undefined,
     cancelledDate: isString(s.cancelledDate) ? s.cancelledDate : undefined,
     trialEndDate: isString(s.trialEndDate) ? s.trialEndDate : undefined,
     autoCreateTransaction:

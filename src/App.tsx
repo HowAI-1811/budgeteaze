@@ -2729,6 +2729,7 @@ type SubscriptionFormState = {
   category: string;
   status: SubscriptionStatus;
   startDate: string;
+  renewalDate: string;
   trialEndDate: string;
   autoCreateTransaction: boolean;
   cardId: string;
@@ -2745,6 +2746,7 @@ const emptySubscriptionForm = (): SubscriptionFormState => ({
   category: '',
   status: 'active',
   startDate: format(new Date(), 'yyyy-MM-dd'),
+  renewalDate: '',
   trialEndDate: '',
   autoCreateTransaction: true,
   cardId: '',
@@ -2797,6 +2799,7 @@ function SubscriptionsView({
       category: sub.category || '',
       status: sub.status,
       startDate: sub.startDate ? sub.startDate.slice(0, 10) : format(new Date(), 'yyyy-MM-dd'),
+      renewalDate: sub.renewalDate ? sub.renewalDate.slice(0, 10) : '',
       trialEndDate: sub.trialEndDate ? sub.trialEndDate.slice(0, 10) : '',
       autoCreateTransaction: sub.autoCreateTransaction,
       cardId: sub.cardId || '',
@@ -2822,6 +2825,7 @@ function SubscriptionsView({
       category: form.category || undefined,
       status: form.status,
       startDate: form.startDate,
+      renewalDate: form.renewalDate || undefined,
       trialEndDate: form.trialEndDate || undefined,
       autoCreateTransaction: form.autoCreateTransaction,
       cardId: form.cardId || undefined,
@@ -2901,7 +2905,7 @@ function SubscriptionsView({
                 <th className="p-4">Category</th>
                 <th className="p-4 text-right">Amount</th>
                 <th className="p-4">Cycle</th>
-                <th className="p-4">Next Charge</th>
+                <th className="p-4">Renewal Date</th>
                 <th className="p-4">Status</th>
                 <th className="p-4 text-center">Auto-Ledger</th>
                 <th className="p-4 text-right">Actions</th>
@@ -2955,7 +2959,11 @@ function SubscriptionsView({
                       </td>
                       <td className="p-4 font-sans text-slate-600">{BILLING_CYCLE_LABELS[sub.billingCycle]}</td>
                       <td className="p-4 font-mono text-slate-600">
-                        {sub.status === 'active' ? format(parseISO(getNextBillingDate(sub, currentDate)), 'MMM d') : '--'}
+                        {sub.renewalDate
+                          ? format(parseISO(sub.renewalDate), 'MMM d, yyyy')
+                          : sub.status === 'active'
+                            ? <span>{format(parseISO(getNextBillingDate(sub, currentDate)), 'MMM d')}<span className="font-sans text-[9px] text-slate-400 ml-1">computed</span></span>
+                            : '--'}
                       </td>
                       <td className="p-4">{statusPill(sub.status)}</td>
                       <td className="p-4 text-center">
@@ -3071,6 +3079,10 @@ function SubscriptionsView({
               <label className="flex flex-col gap-1">
                 <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500">Start Date</span>
                 <input type="date" value={form.startDate} onChange={e => setField('startDate', e.target.value)} className="border border-slate-200 p-2 text-xs rounded outline-none focus:bg-blue-50 focus:border-blue-500" />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500">Renewal Date <span className="normal-case text-slate-400 font-normal">(optional)</span></span>
+                <input type="date" value={form.renewalDate} onChange={e => setField('renewalDate', e.target.value)} className="border border-slate-200 p-2 text-xs rounded outline-none focus:bg-blue-50 focus:border-blue-500" />
               </label>
               <label className="flex flex-col gap-1">
                 <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500">Trial Ends (optional)</span>

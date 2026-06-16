@@ -60,6 +60,7 @@ export interface Subscription extends SyncMeta {
   // Lifecycle
   status: SubscriptionStatus;
   startDate: string; // ISO date — first real charge date
+  renewalDate?: string; // ISO date — user-specified next renewal date
   cancelledDate?: string; // ISO date — set when status → 'cancelled'
   trialEndDate?: string; // ISO date — free trial ends; charge begins after
 
