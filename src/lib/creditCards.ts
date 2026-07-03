@@ -11,14 +11,11 @@ import { parseISO } from 'date-fns';
 import { storage } from './storage';
 import type {
   CreditCard,
-  CardSubscription,
   CardTransaction,
   CardNetwork,
-  SubscriptionStatus,
 } from '../types';
 
 export const CREDIT_CARDS_STORAGE_KEY = 'cyclebudget_credit_cards';
-export const CARD_SUBSCRIPTIONS_STORAGE_KEY = 'cyclebudget_card_subscriptions';
 export const CARD_TRANSACTIONS_STORAGE_KEY = 'cyclebudget_card_transactions';
 
 const nowIso = () => new Date().toISOString();
@@ -26,10 +23,6 @@ const nowIso = () => new Date().toISOString();
 /** Fields the UI supplies; id + sync metadata are stamped by the factory. */
 export type CreditCardInput = Omit<
   CreditCard,
-  'id' | 'createdAt' | 'updatedAt' | 'deletedAt'
->;
-export type CardSubscriptionInput = Omit<
-  CardSubscription,
   'id' | 'createdAt' | 'updatedAt' | 'deletedAt'
 >;
 export type CardTransactionInput = Omit<
@@ -44,11 +37,6 @@ export const loadCreditCards = (): CreditCard[] =>
 export const saveCreditCards = (cards: CreditCard[]): void =>
   storage.write(CREDIT_CARDS_STORAGE_KEY, cards);
 
-export const loadCardSubscriptions = (): CardSubscription[] =>
-  storage.read<CardSubscription[]>(CARD_SUBSCRIPTIONS_STORAGE_KEY, []);
-export const saveCardSubscriptions = (subs: CardSubscription[]): void =>
-  storage.write(CARD_SUBSCRIPTIONS_STORAGE_KEY, subs);
-
 export const loadCardTransactions = (): CardTransaction[] =>
   storage.read<CardTransaction[]>(CARD_TRANSACTIONS_STORAGE_KEY, []);
 export const saveCardTransactions = (txns: CardTransaction[]): void =>
@@ -57,12 +45,6 @@ export const saveCardTransactions = (txns: CardTransaction[]): void =>
 // ── Sync-aware record lifecycle ─────────────────────────────────────────────
 
 export const createCreditCard = (input: CreditCardInput): CreditCard => {
-  const ts = nowIso();
-  return { ...input, id: crypto.randomUUID(), createdAt: ts, updatedAt: ts };
-};
-export const createCardSubscription = (
-  input: CardSubscriptionInput,
-): CardSubscription => {
   const ts = nowIso();
   return { ...input, id: crypto.randomUUID(), createdAt: ts, updatedAt: ts };
 };
@@ -78,10 +60,6 @@ export const touchCreditCard = (
   card: CreditCard,
   changes: Partial<CreditCard>,
 ): CreditCard => ({ ...card, ...changes, updatedAt: nowIso() });
-export const touchCardSubscription = (
-  sub: CardSubscription,
-  changes: Partial<CardSubscription>,
-): CardSubscription => ({ ...sub, ...changes, updatedAt: nowIso() });
 export const touchCardTransaction = (
   txn: CardTransaction,
   changes: Partial<CardTransaction>,
@@ -93,9 +71,6 @@ export const tombstoneCreditCard = (card: CreditCard): CreditCard => ({
   deletedAt: nowIso(),
   updatedAt: nowIso(),
 });
-export const tombstoneCardSubscription = (
-  sub: CardSubscription,
-): CardSubscription => ({ ...sub, deletedAt: nowIso(), updatedAt: nowIso() });
 export const tombstoneCardTransaction = (
   txn: CardTransaction,
 ): CardTransaction => ({ ...txn, deletedAt: nowIso(), updatedAt: nowIso() });
@@ -124,19 +99,9 @@ export const getDaysUntilDue = (
   return Math.round((startOfDay(due) - startOfDay(from)) / 86_400_000);
 };
 
-/**
- * Whether a subscription's billing day has already occurred in the calendar
- * month of `reference`. Posted = day passed; otherwise upcoming.
- */
-export const isCardSubscriptionPosted = (
-  sub: CardSubscription,
-  reference: Date = new Date(),
-): boolean => reference.getDate() >= sub.billingDay;
-
 // ── Import validation ───────────────────────────────────────────────────────
 
 const NETWORKS: CardNetwork[] = ['Visa', 'Mastercard', 'Amex', 'Discover', 'Other'];
-const STATUSES: SubscriptionStatus[] = ['active', 'paused', 'cancelled'];
 
 const isString = (v: unknown): v is string => typeof v === 'string';
 const isFiniteNum = (v: unknown): v is number =>
@@ -171,37 +136,6 @@ export const sanitizeCreditCard = (value: unknown): CreditCard | null => {
     createdAt: isString(c.createdAt) ? c.createdAt : ts,
     updatedAt: isString(c.updatedAt) ? c.updatedAt : ts,
     deletedAt: isString(c.deletedAt) ? c.deletedAt : undefined,
-  };
-};
-
-export const sanitizeCardSubscription = (
-  value: unknown,
-): CardSubscription | null => {
-  if (!value || typeof value !== 'object') return null;
-  const s = value as Record<string, unknown>;
-  if (
-    !isString(s.id) ||
-    !isString(s.cardId) ||
-    !isString(s.name) ||
-    !isFiniteNum(s.amount) ||
-    !isFiniteNum(s.billingDay)
-  ) {
-    return null;
-  }
-  const ts = nowIso();
-  return {
-    id: s.id,
-    cardId: s.cardId,
-    name: s.name,
-    amount: s.amount,
-    billingDay: Math.min(Math.max(Math.round(s.billingDay), 1), 31),
-    category: isString(s.category) ? s.category : '',
-    status: STATUSES.includes(s.status as SubscriptionStatus)
-      ? (s.status as SubscriptionStatus)
-      : 'active',
-    createdAt: isString(s.createdAt) ? s.createdAt : ts,
-    updatedAt: isString(s.updatedAt) ? s.updatedAt : ts,
-    deletedAt: isString(s.deletedAt) ? s.deletedAt : undefined,
   };
 };
 

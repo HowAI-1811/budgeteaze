@@ -54,7 +54,7 @@ import {
   Legend
 } from 'recharts';
 import { cn } from './lib/utils';
-import { Transaction, TransactionType, Subscription, SubscriptionStatus, BillingCycle, CreditCard, CardSubscription, CardTransaction, CardNetwork } from './types';
+import { Transaction, TransactionType, Subscription, SubscriptionStatus, BillingCycle, CreditCard, CardTransaction, CardNetwork } from './types';
 import {
   SUBSCRIPTIONS_STORAGE_KEY,
   loadSubscriptions,
@@ -72,8 +72,6 @@ import {
 import {
   loadCreditCards,
   saveCreditCards,
-  loadCardSubscriptions,
-  saveCardSubscriptions,
   loadCardTransactions,
   saveCardTransactions,
   createCreditCard,
@@ -84,9 +82,7 @@ import {
   getUtilization,
   getAvailableCredit,
   getDaysUntilDue,
-  isCardSubscriptionPosted,
   sanitizeCreditCard,
-  sanitizeCardSubscription,
   sanitizeCardTransaction,
   type CreditCardInput,
   type CardTransactionInput,
@@ -276,7 +272,6 @@ const getCategoriesFromBackup = (backup: unknown, transactions: Transaction[]): 
 
 type MigratedBackup = {
   creditCards: unknown[];
-  cardSubscriptions: unknown[];
   cardTransactions: unknown[];
 };
 
@@ -291,7 +286,6 @@ const migrateBackup = (backup: unknown): MigratedBackup => {
   const b = (backup && typeof backup === 'object' ? backup : {}) as Record<string, unknown>;
   return {
     creditCards: asArray(b.creditCards),
-    cardSubscriptions: asArray(b.cardSubscriptions),
     cardTransactions: asArray(b.cardTransactions),
   };
 };
@@ -311,7 +305,6 @@ export default function App() {
 
   // Credit card entities (raw lists include tombstones).
   const [creditCards, setCreditCards] = useState<CreditCard[]>(() => loadCreditCards());
-  const [cardSubscriptions, setCardSubscriptions] = useState<CardSubscription[]>(() => loadCardSubscriptions());
   const [cardTransactions, setCardTransactions] = useState<CardTransaction[]>(() => loadCardTransactions());
 
   const [currentDate, setCurrentDate] = useState(new Date());
@@ -347,10 +340,6 @@ export default function App() {
   }, [creditCards]);
 
   useEffect(() => {
-    saveCardSubscriptions(cardSubscriptions);
-  }, [cardSubscriptions]);
-
-  useEffect(() => {
     saveCardTransactions(cardTransactions);
   }, [cardTransactions]);
 
@@ -358,10 +347,6 @@ export default function App() {
   const visibleCreditCards = useMemo(
     () => creditCards.filter(isLive),
     [creditCards],
-  );
-  const visibleCardSubscriptions = useMemo(
-    () => cardSubscriptions.filter(isLive),
-    [cardSubscriptions],
   );
   const visibleCardTransactions = useMemo(
     () => cardTransactions.filter(isLive),
@@ -797,7 +782,6 @@ export default function App() {
       subscriptions,
       transactions,
       creditCards,
-      cardSubscriptions,
       cardTransactions,
     };
 
@@ -855,11 +839,6 @@ export default function App() {
         const card = sanitizeCreditCard(item);
         if (card) importedCreditCards.push(card);
       }
-      const importedCardSubscriptions: CardSubscription[] = [];
-      for (const item of migrated.cardSubscriptions) {
-        const sub = sanitizeCardSubscription(item);
-        if (sub) importedCardSubscriptions.push(sub);
-      }
       const importedCardTransactions: CardTransaction[] = [];
       for (const item of migrated.cardTransactions) {
         const txn = sanitizeCardTransaction(item);
@@ -881,7 +860,6 @@ export default function App() {
         setCategories(importedCategories);
         setSubscriptions(importedSubscriptions);
         setCreditCards(importedCreditCards);
-        setCardSubscriptions(importedCardSubscriptions);
         setCardTransactions(importedCardTransactions);
         resetForm();
         // Brief confirmation so the user knows import succeeded
@@ -1292,7 +1270,7 @@ export default function App() {
           <div className="h-full overflow-y-auto animate-in fade-in duration-500">
             <CreditCardDashboard
               cards={visibleCreditCards}
-              cardSubscriptions={visibleCardSubscriptions}
+              subscriptions={visibleSubscriptions}
               cardTransactions={visibleCardTransactions}
               categories={categories}
               currentDate={currentDate}
@@ -1640,7 +1618,7 @@ const fmtDate = (iso?: string) => (iso ? format(parseISO(iso), 'MMM d') : '--');
 
 function CreditCardDashboard({
   cards,
-  cardSubscriptions,
+  subscriptions,
   cardTransactions,
   categories,
   currentDate,
@@ -1653,7 +1631,7 @@ function CreditCardDashboard({
   embedded = false,
 }: {
   cards: CreditCard[];
-  cardSubscriptions: CardSubscription[];
+  subscriptions: Subscription[];
   cardTransactions: CardTransaction[];
   categories: string[];
   currentDate: Date;
@@ -1768,9 +1746,9 @@ function CreditCardDashboard({
   };
 
   const subsForCard = selected
-    ? cardSubscriptions.filter(s => s.cardId === selected.id && s.status === 'active')
+    ? subscriptions.filter(s => s.cardId === selected.id && s.status === 'active')
     : [];
-  const subsTotal = subsForCard.reduce((sum, s) => sum + s.amount, 0);
+  const subsTotal = subsForCard.reduce((sum, s) => sum + getMonthlyEquivalent(s), 0);
 
   const cycleCharges = selected
     ? cardTransactions
@@ -1959,16 +1937,22 @@ function CreditCardDashboard({
               ) : (
                 <ul className="divide-y divide-slate-100">
                   {subsForCard.map(sub => {
-                    const posted = isCardSubscriptionPosted(sub, currentDate);
+                    const billsThisMonth = subscriptionBillsInMonth(sub, currentDate);
+                    const posted = billsThisMonth && currentDate.getDate() >= Math.min(sub.billingDay, 28);
+                    const statusLabel = !billsThisMonth ? 'Not this cycle' : posted ? 'Posted' : 'Upcoming';
                     return (
                       <li key={sub.id} className="flex items-center justify-between px-4 py-3">
                         <div className="flex items-center gap-2">
                           <span className="font-sans font-bold text-slate-900 text-xs">{sub.name}</span>
                           <span className={cn(
                             'inline-flex items-center rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider',
-                            posted ? 'border-slate-200 bg-slate-50 text-slate-500' : 'border-blue-200 bg-blue-50 text-blue-700'
+                            !billsThisMonth
+                              ? 'border-slate-100 bg-slate-50 text-slate-400'
+                              : posted
+                                ? 'border-slate-200 bg-slate-50 text-slate-500'
+                                : 'border-blue-200 bg-blue-50 text-blue-700'
                           )}>
-                            {posted ? 'Posted' : 'Upcoming'}
+                            {statusLabel}
                           </span>
                         </div>
                         <div className="text-right">

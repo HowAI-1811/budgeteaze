@@ -88,17 +88,6 @@ export interface CreditCard extends SyncMeta {
   color?: string; // optional hex for card visual
 }
 
-/** A subscription charged to a specific tracked card. */
-export interface CardSubscription extends SyncMeta {
-  id: string; // crypto.randomUUID()
-  cardId: string; // FK → CreditCard.id
-  name: string; // e.g. "Adobe Creative Cloud"
-  amount: number;
-  billingDay: number; // day of month (1–31)
-  category: string; // maps to an entry in the categories list
-  status: SubscriptionStatus;
-}
-
 /** An ad hoc charge (or payment) recorded against a tracked card. */
 export interface CardTransaction extends SyncMeta {
   id: string; // crypto.randomUUID()
