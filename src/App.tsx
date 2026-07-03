@@ -393,7 +393,7 @@ export default function App() {
   // Whatever the payment covers beyond the subscriptions already recorded
   // this month gets added as one lump-sum ledger expense, so Total Expenses
   // still reflects real spending instead of silently under-counting it.
-  const logCardPayment = (cardId: string, amount: number, date: string) => {
+  const logCardPayment = (cardId: string, amount: number, date: string, item?: string) => {
     addCardTransaction({
       cardId,
       description: 'Payment',
@@ -420,7 +420,7 @@ export default function App() {
       const card = creditCards.find(c => c.id === cardId);
       setTransactions(prev => [...prev, {
         id: crypto.randomUUID(),
-        description: `${card?.name || 'Card'} — other charges`,
+        description: item || `${card?.name || 'Card'} — other charges`,
         amount: otherCharges,
         type: 'debit',
         date,
@@ -1661,7 +1661,7 @@ function CreditCardDashboard({
   onUpdateCard: (id: string, changes: Partial<CreditCard>) => void;
   onDeleteCard: (id: string) => void;
   onAddTransaction: (input: CardTransactionInput) => void;
-  onLogPayment: (cardId: string, amount: number, date: string) => void;
+  onLogPayment: (cardId: string, amount: number, date: string, item?: string) => void;
   onManageSubscriptions: () => void;
   embedded?: boolean;
 }) {
@@ -1675,7 +1675,7 @@ function CreditCardDashboard({
 
   const today = format(new Date(), 'yyyy-MM-dd');
   const [chargeForm, setChargeForm] = useState({ description: '', amount: '', date: today, category: '', posted: true });
-  const [paymentForm, setPaymentForm] = useState({ amount: '', date: today });
+  const [paymentForm, setPaymentForm] = useState({ amount: '', date: today, item: '' });
 
   const selected = cards.find(c => c.id === selectedId) ?? cards[0] ?? null;
 
@@ -1754,8 +1754,8 @@ function CreditCardDashboard({
     if (!selected) return;
     const amount = parseFloat(paymentForm.amount);
     if (!Number.isFinite(amount) || amount <= 0) return;
-    onLogPayment(selected.id, amount, paymentForm.date);
-    setPaymentForm({ amount: '', date: today });
+    onLogPayment(selected.id, amount, paymentForm.date, paymentForm.item.trim() || undefined);
+    setPaymentForm({ amount: '', date: today, item: '' });
     setShowPaymentModal(false);
   };
 
@@ -2132,7 +2132,7 @@ function CreditCardDashboard({
               <h3 className="text-xs uppercase font-bold tracking-widest text-slate-500">Log Payment · {selected.name}</h3>
               <button onClick={() => setShowPaymentModal(false)} className="text-slate-400 hover:text-slate-700"><X className="w-4 h-4" /></button>
             </div>
-            <p className="text-[11px] text-slate-500">Reduces this card's balance. Does not create a budget transaction — pay externally via bill pay.</p>
+            <p className="text-[11px] text-slate-500">Reduces this card's balance. Any subscriptions already in the ledger this month are covered — the rest of the payment is logged as one expense.</p>
             <div className="grid grid-cols-2 gap-4">
               <label className="flex flex-col gap-1">
                 <span className={labelClass}>Amount *</span>
@@ -2143,6 +2143,11 @@ function CreditCardDashboard({
                 <input type="date" value={paymentForm.date} onChange={e => setPaymentForm(p => ({ ...p, date: e.target.value }))} className={inputClass} />
               </label>
             </div>
+            <label className="flex flex-col gap-1">
+              <span className={labelClass}>Item (optional)</span>
+              <input type="text" value={paymentForm.item} onChange={e => setPaymentForm(p => ({ ...p, item: e.target.value }))} className={inputClass} placeholder="e.g. Costco, gas, dining" />
+              <span className="text-[10px] text-slate-400">Labels the leftover charges beyond your linked subscriptions.</span>
+            </label>
             <div className="flex gap-3 pt-2">
               <button onClick={submitPayment} className="px-5 bg-slate-900 text-white text-[11px] uppercase tracking-widest font-bold py-2.5 hover:bg-slate-800 rounded transition-colors">Log Payment</button>
               <button onClick={() => setShowPaymentModal(false)} className="px-5 border border-slate-200 text-slate-600 text-[11px] uppercase tracking-widest font-bold py-2.5 hover:bg-slate-50 rounded transition-colors">Cancel</button>
