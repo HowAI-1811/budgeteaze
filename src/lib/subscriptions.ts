@@ -79,21 +79,38 @@ export const getMonthlyEquivalent = (sub: Subscription): number => {
 };
 
 /**
- * ISO date of the next charge relative to `referenceDate`. If this month's
- * billing day has already passed, rolls to next month. Day is capped at 28.
+ * ISO date of the next charge relative to `referenceDate`, honoring the
+ * subscription's cadence (weekly/monthly land every month; quarterly/annual
+ * only land every 3rd/12th month counting from `startDate`). Day is capped
+ * at 28. Only consults `startDate` — callers should prefer `renewalDate`
+ * directly when the user has set one explicitly.
  */
 export const getNextBillingDate = (
   sub: Subscription,
   referenceDate: Date,
 ): string => {
   const day = Math.min(sub.billingDay, 28);
-  const candidate = new Date(
-    referenceDate.getFullYear(),
-    referenceDate.getMonth(),
-    day,
-  );
-  if (candidate < new Date()) {
-    candidate.setMonth(candidate.getMonth() + 1);
+  const today = new Date();
+
+  if (sub.billingCycle === 'monthly' || sub.billingCycle === 'weekly') {
+    const candidate = new Date(
+      referenceDate.getFullYear(),
+      referenceDate.getMonth(),
+      day,
+    );
+    if (candidate < today) {
+      candidate.setMonth(candidate.getMonth() + 1);
+    }
+    return format(candidate, 'yyyy-MM-dd');
+  }
+
+  // Quarterly/annual: walk forward from startDate in cycle-sized steps
+  // until we reach the next occurrence on or after today.
+  const monthsPerCycle = sub.billingCycle === 'quarterly' ? 3 : 12;
+  const start = parseISO(sub.startDate);
+  const candidate = new Date(start.getFullYear(), start.getMonth(), day);
+  while (candidate < today) {
+    candidate.setMonth(candidate.getMonth() + monthsPerCycle);
   }
   return format(candidate, 'yyyy-MM-dd');
 };
@@ -115,19 +132,22 @@ export const subscriptionBillsInMonth = (
   // Subscription hasn't started by the end of this month → no charge.
   if (parseISO(sub.startDate) > endOfMonth(month)) return false;
 
+  // The user-editable renewal date, when set, is authoritative for which
+  // month a quarterly/annual charge falls in — it's how you correct drift
+  // between the original signup date and the actual billing month.
+  const anchor = sub.renewalDate ? parseISO(sub.renewalDate) : parseISO(sub.startDate);
+
   switch (sub.billingCycle) {
     case 'weekly':
     case 'monthly':
       return true;
     case 'quarterly': {
-      const startMonth = parseISO(sub.startDate).getMonth();
+      const anchorMonth = anchor.getMonth();
       const viewMonth = month.getMonth();
-      return (viewMonth - startMonth + 12) % 3 === 0;
+      return (viewMonth - anchorMonth + 12) % 3 === 0;
     }
-    case 'annual': {
-      const startMonth = format(parseISO(sub.startDate), 'MM');
-      return format(month, 'MM') === startMonth;
-    }
+    case 'annual':
+      return format(month, 'MM') === format(anchor, 'MM');
     default:
       return false;
   }

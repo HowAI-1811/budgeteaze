@@ -2770,7 +2770,10 @@ function SubscriptionsView({
             )}
 
             {form.cardId && (
-              <p className="text-[10px] text-slate-500 font-semibold">Tip: if this subscription also lives in your recurring transactions, remove it there to avoid double-counting — the card's monthly payment already covers it.</p>
+              <p className="text-[10px] text-slate-500 font-semibold">
+                This subscription will still appear in your ledger's Bills area as a "Charged to [Card]" badge — that's expected, it's already settled by the card's payment, not a separate bill to pay. If you'd
+                <em> also</em> entered this same bill by hand as a plain recurring transaction before linking it here, delete that duplicate — otherwise it'll double-count toward your monthly totals.
+              </p>
             )}
 
             <div className="flex gap-3 pt-2">
