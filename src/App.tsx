@@ -481,6 +481,19 @@ export default function App() {
     [subscriptions],
   );
 
+  // Card-linked subscriptions are settled when the card's own bill is paid —
+  // they shouldn't surface as separately-payable line items in the ledger.
+  // Maps subscription id -> the CreditCard it's charged to.
+  const subscriptionCardById = useMemo(() => {
+    const map = new Map<string, CreditCard>();
+    subscriptions.forEach(s => {
+      if (!s.cardId) return;
+      const card = creditCards.find(c => c.id === s.cardId);
+      if (card) map.set(s.id, card);
+    });
+    return map;
+  }, [subscriptions, creditCards]);
+
   const activeSubscriptions = useMemo(
     () => visibleSubscriptions.filter(s => s.status === 'active'),
     [visibleSubscriptions],
@@ -576,7 +589,10 @@ export default function App() {
           category: sub.category,
           isRecurring: true,
           recurringId: sub.id,
-          paid: false,
+          // Card-linked subscriptions are settled by the card's own bill
+          // payment, not individually — mark them paid on arrival so they
+          // don't nag as an outstanding bill in the ledger.
+          paid: !!sub.cardId,
           notes: sub.notes,
         };
       });
@@ -1266,17 +1282,19 @@ export default function App() {
               onTogglePaid={togglePaid}
               comparison={monthComparison}
               subscriptionIds={subscriptionIds}
+              subscriptionCardById={subscriptionCardById}
               headerBg="bg-slate-900"
               headerText="text-white"
             />
-            <CyclePane 
-              title="Cycle 02 // 15th - End" 
-              stats={cycles.second} 
+            <CyclePane
+              title="Cycle 02 // 15th - End"
+              stats={cycles.second}
               onEdit={editTransaction}
               onDelete={deleteTransaction}
               onTogglePaid={togglePaid}
               comparison={monthComparison}
               subscriptionIds={subscriptionIds}
+              subscriptionCardById={subscriptionCardById}
               headerBg="bg-slate-100"
               headerText="text-slate-900"
               borderLeft
@@ -2526,17 +2544,19 @@ function CyclePane({
   onTogglePaid,
   comparison,
   subscriptionIds,
-  headerBg, 
+  subscriptionCardById,
+  headerBg,
   headerText,
   borderLeft = false
-}: { 
-  title: string; 
-  stats: any; 
+}: {
+  title: string;
+  stats: any;
   onEdit: (t: Transaction) => void;
   onDelete: (id: string, cascade?: boolean) => void;
   onTogglePaid: (id: string) => void;
   comparison: MonthComparison;
   subscriptionIds: Set<string>;
+  subscriptionCardById: Map<string, CreditCard>;
   headerBg: string;
   headerText: string;
   borderLeft?: boolean;
@@ -2620,20 +2640,30 @@ function CyclePane({
                       </td>
                       <td className="p-3 border-r border-slate-100">
                         {t.type === 'debit' ? (
-                          <button
-                            type="button"
-                            onClick={() => onTogglePaid(t.id)}
-                            className={cn(
-                              "inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-[9px] font-bold uppercase tracking-wider transition-all",
-                              t.paid
-                                ? "border-emerald-200 bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
-                                : "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100"
-                            )}
-                            title={t.paid ? "Mark this bill unpaid" : "Mark this bill paid"}
-                          >
-                            {t.paid ? <CheckCircle2 className="w-3 h-3" /> : <Circle className="w-3 h-3" />}
-                            {t.paid ? 'Paid' : 'Unpaid'}
-                          </button>
+                          t.recurringId && subscriptionCardById.has(t.recurringId) ? (
+                            <span
+                              className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50 px-2 py-1 text-[9px] font-bold uppercase tracking-wider text-slate-500"
+                              title="Settled when you pay this card's bill — not paid individually"
+                            >
+                              <CreditCardIcon className="w-3 h-3" />
+                              {subscriptionCardById.get(t.recurringId)!.name}
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => onTogglePaid(t.id)}
+                              className={cn(
+                                "inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-[9px] font-bold uppercase tracking-wider transition-all",
+                                t.paid
+                                  ? "border-emerald-200 bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
+                                  : "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100"
+                              )}
+                              title={t.paid ? "Mark this bill unpaid" : "Mark this bill paid"}
+                            >
+                              {t.paid ? <CheckCircle2 className="w-3 h-3" /> : <Circle className="w-3 h-3" />}
+                              {t.paid ? 'Paid' : 'Unpaid'}
+                            </button>
+                          )
                         ) : (
                           <span className="inline-flex items-center rounded-full border border-emerald-100 bg-emerald-50 px-2 py-1 text-[9px] font-bold uppercase tracking-wider text-emerald-700">
                             Income
