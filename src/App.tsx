@@ -386,7 +386,13 @@ export default function App() {
     setCardTransactions(prev => [...prev, createCardTransaction(input)]);
   };
   // Records a payment: reduces the card balance and logs a negative charge.
-  // Does NOT create a budget transaction (handled externally via bill pay).
+  // Subscriptions charged to this card are already sitting in the ledger
+  // (see the injection effect below), so paying them isn't a new expense.
+  // But a card statement usually also covers other, un-itemized charges
+  // (groceries, gas, one-off purchases) that were never logged individually.
+  // Whatever the payment covers beyond the subscriptions already recorded
+  // this month gets added as one lump-sum ledger expense, so Total Expenses
+  // still reflects real spending instead of silently under-counting it.
   const logCardPayment = (cardId: string, amount: number, date: string) => {
     addCardTransaction({
       cardId,
@@ -403,6 +409,26 @@ export default function App() {
           : c,
       ),
     );
+
+    const paymentMonth = date.slice(0, 7);
+    const subscriptionChargesThisMonth = transactions
+      .filter(t => t.date.startsWith(paymentMonth) && t.recurringId && subscriptionCardById.get(t.recurringId)?.id === cardId)
+      .reduce((sum, t) => sum + t.amount, 0);
+    const otherCharges = Math.abs(amount) - subscriptionChargesThisMonth;
+
+    if (otherCharges > 0.005) {
+      const card = creditCards.find(c => c.id === cardId);
+      setTransactions(prev => [...prev, {
+        id: crypto.randomUUID(),
+        description: `${card?.name || 'Card'} — other charges`,
+        amount: otherCharges,
+        type: 'debit',
+        date,
+        category: 'Credit Card',
+        paid: true,
+        notes: 'Auto-added from Log Payment — covers charges on this statement not already itemized in the ledger.',
+      }]);
+    }
   };
 
   // Live (non-tombstoned) subscriptions — what every view and the injection
