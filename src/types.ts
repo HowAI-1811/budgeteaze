@@ -1,5 +1,4 @@
 export type TransactionType = 'debit' | 'credit';
-export type AccountType = 'credit_card';
 
 export interface Transaction {
   id: string;
@@ -12,15 +11,6 @@ export interface Transaction {
   recurringId?: string;
   paid?: boolean;
   notes?: string;
-  accountType?: AccountType;
-  accountName?: string;
-  statementBalance?: number;
-  currentBalance?: number;
-  minimumPayment?: number;
-  dueDate?: string;
-  creditLimit?: number;
-  interestRate?: number;
-  lastStatementDate?: string;
 }
 
 /**
