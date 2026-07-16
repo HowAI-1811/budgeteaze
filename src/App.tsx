@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useMemo, useEffect, useRef, type ChangeEvent } from 'react';
+import React, { useState, useMemo, useEffect, useRef, type ChangeEvent, type FormEvent } from 'react';
 import { 
   format, 
   startOfMonth, 
@@ -55,6 +55,11 @@ import {
 } from 'recharts';
 import { cn } from './lib/utils';
 import { Transaction, TransactionType, Subscription, SubscriptionStatus, BillingCycle, CreditCard, CardTransaction, CardNetwork } from './types';
+import { auth } from './lib/firebase';
+import { loadFromCloud, saveToCloud, saveToCloudDebounced, BudgetData } from './lib/sync';
+import { signInWithEmailAndPassword, signOut, onAuthStateChanged } from 'firebase/auth';
+import type { User } from 'firebase/auth';
+import { Cloud, CloudOff, Loader2 } from 'lucide-react';
 import {
   SUBSCRIPTIONS_STORAGE_KEY,
   loadSubscriptions,
@@ -307,6 +312,15 @@ export default function App() {
   const [creditCards, setCreditCards] = useState<CreditCard[]>(() => loadCreditCards());
   const [cardTransactions, setCardTransactions] = useState<CardTransaction[]>(() => loadCardTransactions());
 
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [syncStatus, setSyncStatus] = useState<'offline' | 'synced' | 'syncing' | 'error'>('offline');
+  const [showSyncModal, setShowSyncModal] = useState(false);
+  // Auth Form states
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [isAuthSubmitting, setIsAuthSubmitting] = useState(false);
+
   const [currentDate, setCurrentDate] = useState(new Date());
   const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
 
@@ -323,25 +337,87 @@ export default function App() {
   const [newCategory, setNewCategory] = useState('');
   const importInputRef = useRef<HTMLInputElement>(null);
 
+  // ── Sync Integration ───────────────────────────────────────────────────────
+  // true while sign-in or session-restore sync is in progress — blocks auto-sync
+  const isInitialLoad = useRef(true);
+  // true after downloading from cloud — skips one auto-sync run to avoid re-upload
+  const justSyncedFromCloud = useRef(false);
+
+  // Restore a previously-signed-in session on app load
   useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      if (user && user.isAnonymous) {
+        // Legacy anonymous session — clear it out
+        await signOut(auth);
+        return; // onAuthStateChanged will fire again with user=null
+      }
+      if (user && isInitialLoad.current) {
+        // Persisted email login: restore session and run conflict resolution
+        setCurrentUser(user);
+        setSyncStatus('syncing');
+        try {
+          const cloudData = await loadFromCloud(user.uid);
+          const localTimestamp = localStorage.getItem('cyclebudget_last_updated') || '';
+          if (cloudData && cloudData.updatedAt && cloudData.updatedAt > localTimestamp) {
+            // Cloud is newer — download it
+            justSyncedFromCloud.current = true;
+            setTransactions(cloudData.transactions || []);
+            setCategories(cloudData.categories || []);
+            setSubscriptions(cloudData.subscriptions || []);
+            setCreditCards(cloudData.creditCards || []);
+            setCardTransactions(cloudData.cardTransactions || []);
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(cloudData.transactions || []));
+            localStorage.setItem(CATEGORY_STORAGE_KEY, JSON.stringify(cloudData.categories || []));
+            saveSubscriptions(cloudData.subscriptions || []);
+            saveCreditCards(cloudData.creditCards || []);
+            saveCardTransactions(cloudData.cardTransactions || []);
+            localStorage.setItem('cyclebudget_last_updated', cloudData.updatedAt);
+          }
+          // If local is newer: auto-sync will push it once isInitialLoad is false
+          setSyncStatus('synced');
+        } catch (err) {
+          console.error('Session restore sync failed:', err);
+          setSyncStatus('error');
+        } finally {
+          isInitialLoad.current = false;
+        }
+      } else if (!user) {
+        // No session or signed out
+        setCurrentUser(null);
+        setSyncStatus('offline');
+        isInitialLoad.current = true;
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Auto-sync: fires when data changes while signed in
+  useEffect(() => {
+    if (isInitialLoad.current) return;
+    if (!currentUser) return;
+
+    // Skip one run after downloading from cloud to avoid immediately re-uploading
+    if (justSyncedFromCloud.current) {
+      justSyncedFromCloud.current = false;
+      return;
+    }
+
+    // Save locally
+    const timestamp = new Date().toISOString();
+    localStorage.setItem('cyclebudget_last_updated', timestamp);
     localStorage.setItem(STORAGE_KEY, JSON.stringify(transactions));
-  }, [transactions]);
-
-  useEffect(() => {
     localStorage.setItem(CATEGORY_STORAGE_KEY, JSON.stringify(categories));
-  }, [categories]);
-
-  useEffect(() => {
     saveSubscriptions(subscriptions);
-  }, [subscriptions]);
-
-  useEffect(() => {
     saveCreditCards(creditCards);
-  }, [creditCards]);
-
-  useEffect(() => {
     saveCardTransactions(cardTransactions);
-  }, [cardTransactions]);
+
+    // Sync to Firebase (debounced)
+    saveToCloudDebounced(
+      currentUser.uid,
+      { transactions, categories, subscriptions, creditCards, cardTransactions },
+      setSyncStatus
+    );
+  }, [transactions, categories, subscriptions, creditCards, cardTransactions, currentUser]);
 
   // Live (non-tombstoned) credit card entities for the dashboard.
   const visibleCreditCards = useMemo(
@@ -957,6 +1033,131 @@ export default function App() {
     return { pieData, trendData };
   }, [monthTransactions, transactions, currentDate]);
 
+  const handleSignIn = async (e: FormEvent) => {
+    e.preventDefault();
+    setAuthError('');
+    setIsAuthSubmitting(true);
+    isInitialLoad.current = true; // block auto-sync while we do conflict resolution
+
+    try {
+      const userCredential = await signInWithEmailAndPassword(auth, authEmail, authPassword);
+      const user = userCredential.user;
+      setCurrentUser(user);
+      setSyncStatus('syncing');
+
+      const cloudData = await loadFromCloud(user.uid);
+      const localTimestamp = localStorage.getItem('cyclebudget_last_updated') || '';
+
+      if (cloudData && cloudData.updatedAt && cloudData.updatedAt > localTimestamp) {
+        // Cloud is newer — load it
+        justSyncedFromCloud.current = true;
+        setTransactions(cloudData.transactions || []);
+        setCategories(cloudData.categories || []);
+        setSubscriptions(cloudData.subscriptions || []);
+        setCreditCards(cloudData.creditCards || []);
+        setCardTransactions(cloudData.cardTransactions || []);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(cloudData.transactions || []));
+        localStorage.setItem(CATEGORY_STORAGE_KEY, JSON.stringify(cloudData.categories || []));
+        saveSubscriptions(cloudData.subscriptions || []);
+        saveCreditCards(cloudData.creditCards || []);
+        saveCardTransactions(cloudData.cardTransactions || []);
+        localStorage.setItem('cyclebudget_last_updated', cloudData.updatedAt);
+      } else {
+        // Local is newer or no cloud data — upload local budget to this account
+        await saveToCloud(user.uid, {
+          transactions,
+          categories,
+          subscriptions,
+          creditCards,
+          cardTransactions
+        });
+      }
+
+      setSyncStatus('synced');
+      setShowSyncModal(false);
+      setAuthEmail('');
+      setAuthPassword('');
+    } catch (err: any) {
+      console.error('Sign-in error:', err);
+      if (err.code === 'auth/wrong-password' || err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential') {
+        setAuthError('Invalid email or password.');
+      } else if (err.code === 'auth/too-many-requests') {
+        setAuthError('Too many attempts. Please wait a moment and try again.');
+      } else {
+        setAuthError(err.message || 'Sign-in failed. Please try again.');
+      }
+    } finally {
+      isInitialLoad.current = false;
+      setIsAuthSubmitting(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    if (confirm("Sign out? Your budget stays saved on this device.")) {
+      try {
+        await signOut(auth);
+        // onAuthStateChanged will fire and set currentUser=null, syncStatus='offline'
+        setShowSyncModal(false);
+      } catch (err) {
+        console.error('Sign out error:', err);
+      }
+    }
+  };
+
+  const forceUploadToCloud = async () => {
+    if (!currentUser) return;
+    if (confirm("Are you sure you want to overwrite cloud data with your current local data? This cannot be undone.")) {
+      setSyncStatus('syncing');
+      try {
+        const localData: BudgetData = {
+          transactions,
+          categories,
+          subscriptions,
+          creditCards,
+          cardTransactions
+        };
+        await saveToCloud(currentUser.uid, localData);
+        setSyncStatus('synced');
+        alert("✓ Cloud data successfully updated with local budget.");
+      } catch (err) {
+        console.error('Force upload failed:', err);
+        setSyncStatus('error');
+      }
+    }
+  };
+
+  const forceDownloadFromCloud = async () => {
+    if (!currentUser) return;
+    if (confirm("Are you sure you want to download data from the cloud? This will overwrite ALL your current local data with the remote copy.")) {
+      setSyncStatus('syncing');
+      try {
+        const cloudData = await loadFromCloud(currentUser.uid);
+        if (cloudData) {
+          setTransactions(cloudData.transactions || []);
+          setCategories(cloudData.categories || []);
+          setSubscriptions(cloudData.subscriptions || []);
+          setCreditCards(cloudData.creditCards || []);
+          setCardTransactions(cloudData.cardTransactions || []);
+          
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(cloudData.transactions || []));
+          localStorage.setItem(CATEGORY_STORAGE_KEY, JSON.stringify(cloudData.categories || []));
+          saveSubscriptions(cloudData.subscriptions || []);
+          saveCreditCards(cloudData.creditCards || []);
+          saveCardTransactions(cloudData.cardTransactions || []);
+          localStorage.setItem('cyclebudget_last_updated', cloudData.updatedAt || '');
+          setSyncStatus('synced');
+          alert("✓ Local budget successfully updated with cloud data.");
+        } else {
+          alert("No data found in the cloud for this account.");
+          setSyncStatus('synced');
+        }
+      } catch (err) {
+        console.error('Force download failed:', err);
+        setSyncStatus('error');
+      }
+    }
+  };
+
   const COLORS = ['#2563EB', '#7C3AED', '#DB2777', '#EA580C', '#F59E0B', '#10B981', '#06B6D4', '#6366F1'];
 
   return (
@@ -1074,6 +1275,30 @@ export default function App() {
                 Import
               </button>
             </div>
+
+            <button
+              onClick={() => setShowSyncModal(true)}
+              className={cn(
+                "flex items-center gap-2 px-2 py-2.5 border rounded-md text-[9px] font-bold uppercase tracking-wider transition-all shadow-sm shrink-0 w-28 justify-center",
+                syncStatus === 'synced' ? "bg-emerald-50 border-emerald-200 text-emerald-700 hover:bg-emerald-100" :
+                syncStatus === 'syncing' ? "bg-amber-50 border-amber-200 text-amber-700 hover:bg-amber-100" :
+                syncStatus === 'error' ? "bg-rose-50 border-rose-200 text-rose-700 hover:bg-rose-100" :
+                "bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100"
+              )}
+              title="Cloud Sync"
+            >
+              {syncStatus === 'synced' && <Cloud className="w-3.5 h-3.5" />}
+              {syncStatus === 'syncing' && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+              {syncStatus === 'error' && <CloudOff className="w-3.5 h-3.5" />}
+              {syncStatus === 'offline' && <CloudOff className="w-3.5 h-3.5" />}
+              <span>
+                {syncStatus === 'synced' && 'Synced'}
+                {syncStatus === 'syncing' && 'Syncing'}
+                {syncStatus === 'error' && 'Error'}
+                {syncStatus === 'offline' && 'Sign In'}
+              </span>
+            </button>
+
             <input
               ref={importInputRef}
               type="file"
@@ -1581,6 +1806,115 @@ export default function App() {
           </div>
         </form>
       </footer>
+
+      {/* Cloud Sync Modal */}
+      {showSyncModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4" onClick={() => setShowSyncModal(false)}>
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6 space-y-4" onClick={e => e.stopPropagation()}>
+            <div className="flex justify-between items-center">
+              <h3 className="text-xs uppercase font-bold tracking-widest text-slate-500">Firebase Cloud Sync</h3>
+              <button onClick={() => setShowSyncModal(false)} className="text-slate-400 hover:text-slate-700">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Status Section */}
+            <div className="bg-slate-50 p-4 rounded-lg flex items-center gap-3 border border-slate-100">
+              <div className="p-2 rounded-full bg-white shadow-sm flex items-center justify-center w-10 h-10 shrink-0">
+                {syncStatus === 'synced' && <Cloud className="w-6 h-6 text-emerald-600" />}
+                {syncStatus === 'syncing' && <Loader2 className="w-6 h-6 text-amber-500 animate-spin" />}
+                {syncStatus === 'error' && <CloudOff className="w-6 h-6 text-rose-600" />}
+                {syncStatus === 'offline' && <CloudOff className="w-6 h-6 text-slate-400" />}
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-bold text-slate-700">
+                  {syncStatus === 'synced' && `Synced — ${currentUser?.email}`}
+                  {syncStatus === 'syncing' && 'Saving changes to cloud...'}
+                  {syncStatus === 'error' && 'Failed to sync. Will retry on next change.'}
+                  {syncStatus === 'offline' && 'Local only — sign in to sync across devices'}
+                </p>
+                <p className="text-[10px] text-slate-500">
+                  {syncStatus === 'offline' ? 'Data saved on this device only' : 'Firebase Cloud Sync'}
+                </p>
+              </div>
+            </div>
+
+            {authError && (
+              <div className="p-3 bg-rose-50 text-rose-800 text-xs rounded border border-rose-100 flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>{authError}</span>
+              </div>
+            )}
+
+            {/* Sign In / Sign Out */}
+            {!currentUser ? (
+              <form onSubmit={handleSignIn} className="space-y-3 border-t border-slate-100 pt-3">
+                <p className="text-[10px] text-slate-500 leading-relaxed">
+                  Sign in to automatically sync your budget across all your devices.
+                </p>
+                <label className="flex flex-col gap-1">
+                  <span className="text-[9px] uppercase font-bold tracking-wider text-slate-400">Email Address</span>
+                  <input
+                    type="email"
+                    required
+                    value={authEmail}
+                    onChange={e => setAuthEmail(e.target.value)}
+                    className="px-3 py-2 border border-slate-200 rounded text-xs focus:outline-none focus:border-blue-500 font-mono"
+                    placeholder="you@example.com"
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="text-[9px] uppercase font-bold tracking-wider text-slate-400">Password</span>
+                  <input
+                    type="password"
+                    required
+                    value={authPassword}
+                    onChange={e => setAuthPassword(e.target.value)}
+                    className="px-3 py-2 border border-slate-200 rounded text-xs focus:outline-none focus:border-blue-500 font-mono"
+                    placeholder="••••••••"
+                  />
+                </label>
+                <button
+                  type="submit"
+                  disabled={isAuthSubmitting}
+                  className="w-full flex items-center justify-center gap-2 bg-blue-600 text-white text-[10px] font-bold uppercase tracking-wider py-2.5 hover:bg-blue-700 rounded transition-colors disabled:bg-blue-400"
+                >
+                  {isAuthSubmitting && <Loader2 className="w-3 h-3 animate-spin" />}
+                  Sign In & Sync
+                </button>
+              </form>
+            ) : (
+              <div className="space-y-3 border-t border-slate-100 pt-3">
+                <button
+                  onClick={handleSignOut}
+                  className="w-full flex items-center justify-center gap-2 border border-slate-200 text-slate-700 text-[10px] font-bold uppercase tracking-wider py-2.5 hover:bg-slate-50 rounded transition-colors"
+                >
+                  Sign Out
+                </button>
+              </div>
+            )}
+
+            {/* Force Actions Section */}
+            <div className="border-t border-slate-100 pt-3 space-y-2">
+              <h4 className="text-[9px] uppercase font-bold tracking-widest text-slate-400 mb-1">Manual Cloud Sync</h4>
+              <div className="flex gap-2">
+                <button 
+                  onClick={forceUploadToCloud}
+                  className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 border border-slate-200 text-[9px] font-bold uppercase tracking-wider text-slate-600 hover:bg-slate-50 hover:text-blue-600 transition-colors"
+                >
+                  Upload Local
+                </button>
+                <button 
+                  onClick={forceDownloadFromCloud}
+                  className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 border border-slate-200 text-[9px] font-bold uppercase tracking-wider text-slate-600 hover:bg-slate-50 hover:text-blue-600 transition-colors"
+                >
+                  Download Cloud
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
