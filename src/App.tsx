@@ -472,8 +472,17 @@ export default function App() {
     );
 
     const paymentMonth = date.slice(0, 7);
+    // Build the subscription→card map inline so we don't rely on the
+    // subscriptionCardById useMemo, which is declared later in the component
+    // body and would be undefined if referenced via closure here.
+    const subCardMap = new Map<string, string>();
+    subscriptions.forEach(s => {
+      if (!s.cardId) return;
+      const card = creditCards.find(c => c.id === s.cardId);
+      if (card) subCardMap.set(s.id, card.id);
+    });
     const subscriptionChargesThisMonth = transactions
-      .filter(t => t.date.startsWith(paymentMonth) && t.recurringId && subscriptionCardById.get(t.recurringId)?.id === cardId)
+      .filter(t => t.date.startsWith(paymentMonth) && t.recurringId && subCardMap.get(t.recurringId) === cardId)
       .reduce((sum, t) => sum + t.amount, 0);
     const otherCharges = Math.abs(amount) - subscriptionChargesThisMonth;
 
