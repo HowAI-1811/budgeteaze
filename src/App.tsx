@@ -2207,7 +2207,7 @@ function CreditCardDashboard({
                 </span>
               </div>
               <button
-                onClick={() => { setPaymentForm({ amount: selected.minDue ? String(selected.minDue) : '', date: today }); setShowPaymentModal(true); }}
+                onClick={() => { setPaymentForm({ amount: selected.minDue ? String(selected.minDue) : '', date: today, item: '' }); setShowPaymentModal(true); }}
                 className="flex items-center gap-1.5 rounded bg-slate-900 px-3 py-1.5 text-[10px] uppercase tracking-widest font-bold text-white hover:bg-slate-800 transition-colors"
               >
                 <Wallet className="w-3 h-3" /> Log Payment
