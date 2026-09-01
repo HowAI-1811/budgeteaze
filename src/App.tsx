@@ -87,6 +87,7 @@ import {
   getUtilization,
   getAvailableCredit,
   getDaysUntilDue,
+  getUnappliedMonthlyCardPurchases,
   sanitizeCreditCard,
   sanitizeCardTransaction,
   type CreditCardInput,
@@ -534,6 +535,42 @@ export default function App() {
     () => visibleSubscriptions.filter(s => s.status === 'active'),
     [visibleSubscriptions],
   );
+
+  // Roll this calendar month's card-linked subscription purchases into each
+  // card's opening balance. Each card stores the applied subscription/month
+  // keys, so refreshes, syncs, and React StrictMode cannot add them twice.
+  const purchaseMonthKey = format(new Date(), 'yyyy-MM');
+  useEffect(() => {
+    const purchaseMonth = parseISO(`${purchaseMonthKey}-01`);
+
+    setCreditCards(prev => {
+      let changed = false;
+      const next = prev.map(card => {
+        if (!isLive(card)) return card;
+
+        const purchases = getUnappliedMonthlyCardPurchases(
+          card,
+          subscriptions,
+          purchaseMonth,
+        );
+        if (purchases.length === 0) return card;
+
+        changed = true;
+        return touchCreditCard(card, {
+          balance: card.balance + purchases.reduce(
+            (sum, purchase) => sum + purchase.subscription.amount,
+            0,
+          ),
+          appliedPurchaseKeys: [
+            ...(card.appliedPurchaseKeys ?? []),
+            ...purchases.map(purchase => purchase.key),
+          ],
+        });
+      });
+
+      return changed ? next : prev;
+    });
+  }, [purchaseMonthKey, subscriptions]);
 
   const subscriptionMonthlyTotal = useMemo(
     () => activeSubscriptions.reduce((sum, s) => sum + getMonthlyEquivalent(s), 0),

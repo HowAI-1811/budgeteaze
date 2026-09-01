@@ -7,12 +7,14 @@
  * unit-testable and reusable by a future sync engine.
  */
 
-import { parseISO } from 'date-fns';
+import { format, parseISO } from 'date-fns';
 import { storage } from './storage';
+import { subscriptionBillsInMonth } from './subscriptions';
 import type {
   CreditCard,
   CardTransaction,
   CardNetwork,
+  Subscription,
 } from '../types';
 
 export const CREDIT_CARDS_STORAGE_KEY = 'cyclebudget_credit_cards';
@@ -87,6 +89,37 @@ export const getUtilization = (card: CreditCard): number | null =>
 export const getAvailableCredit = (card: CreditCard): number =>
   Math.max(card.limit - card.balance, 0);
 
+export type MonthlyCardPurchase = {
+  key: string;
+  subscription: Subscription;
+};
+
+/**
+ * Card-linked subscription purchases that belong in this month's opening
+ * balance and have not already been applied. The durable key on the card makes
+ * this safe to run after every refresh and sync without double-counting.
+ */
+export const getUnappliedMonthlyCardPurchases = (
+  card: CreditCard,
+  subscriptions: Subscription[],
+  month: Date,
+): MonthlyCardPurchase[] => {
+  const monthKey = format(month, 'yyyy-MM');
+  const applied = new Set(card.appliedPurchaseKeys ?? []);
+
+  return subscriptions
+    .filter(
+      sub =>
+        sub.cardId === card.id &&
+        subscriptionBillsInMonth(sub, month),
+    )
+    .map(subscription => ({
+      key: `${subscription.id}:${monthKey}`,
+      subscription,
+    }))
+    .filter(purchase => !applied.has(purchase.key));
+};
+
 /** Whole days from `from` until the card's due date (negative if past due). */
 export const getDaysUntilDue = (
   card: CreditCard,
@@ -133,6 +166,9 @@ export const sanitizeCreditCard = (value: unknown): CreditCard | null => {
     stmtCloseDate: isString(c.stmtCloseDate) ? c.stmtCloseDate : '',
     apr: isFiniteNum(c.apr) ? c.apr : undefined,
     color: isString(c.color) ? c.color : undefined,
+    appliedPurchaseKeys: Array.isArray(c.appliedPurchaseKeys)
+      ? c.appliedPurchaseKeys.filter(isString)
+      : undefined,
     createdAt: isString(c.createdAt) ? c.createdAt : ts,
     updatedAt: isString(c.updatedAt) ? c.updatedAt : ts,
     deletedAt: isString(c.deletedAt) ? c.deletedAt : undefined,

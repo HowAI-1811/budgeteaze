@@ -86,6 +86,8 @@ export interface CreditCard extends SyncMeta {
   stmtCloseDate: string; // ISO date string
   apr?: number;
   color?: string; // optional hex for card visual
+  /** Subscription charge keys already rolled into `balance` (subscriptionId:yyyy-MM). */
+  appliedPurchaseKeys?: string[];
 }
 
 /** An ad hoc charge (or payment) recorded against a tracked card. */

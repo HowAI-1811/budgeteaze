@@ -5,10 +5,11 @@ import {
   getUtilization,
   getAvailableCredit,
   getDaysUntilDue,
+  getUnappliedMonthlyCardPurchases,
   sanitizeCreditCard,
   sanitizeCardTransaction,
 } from './creditCards';
-import type { CreditCard, CardTransaction } from '../types';
+import type { CreditCard, CardTransaction, Subscription } from '../types';
 
 const baseCard = (overrides: Partial<CreditCard> = {}): CreditCard => ({
   id: 'card-1',
@@ -20,6 +21,21 @@ const baseCard = (overrides: Partial<CreditCard> = {}): CreditCard => ({
   minDue: 25,
   dueDate: '2026-06-15',
   stmtCloseDate: '2026-05-20',
+  createdAt: '2026-01-01T00:00:00.000Z',
+  updatedAt: '2026-01-01T00:00:00.000Z',
+  ...overrides,
+});
+
+const baseSubscription = (overrides: Partial<Subscription> = {}): Subscription => ({
+  id: 'sub-1',
+  name: 'Streaming',
+  amount: 19.99,
+  billingCycle: 'monthly',
+  billingDay: 5,
+  status: 'active',
+  startDate: '2026-01-01',
+  autoCreateTransaction: true,
+  cardId: 'card-1',
   createdAt: '2026-01-01T00:00:00.000Z',
   updatedAt: '2026-01-01T00:00:00.000Z',
   ...overrides,
@@ -60,6 +76,42 @@ test('getDaysUntilDue returns null when no due date is set', () => {
   assert.equal(getDaysUntilDue(baseCard({ dueDate: '' }), new Date(2026, 5, 1)), null);
 });
 
+test('getUnappliedMonthlyCardPurchases returns card-linked purchases once per month', () => {
+  const purchases = getUnappliedMonthlyCardPurchases(
+    baseCard(),
+    [baseSubscription()],
+    new Date(2026, 5, 1),
+  );
+
+  assert.deepEqual(purchases.map(p => ({ key: p.key, amount: p.subscription.amount })), [
+    { key: 'sub-1:2026-06', amount: 19.99 },
+  ]);
+});
+
+test('getUnappliedMonthlyCardPurchases skips purchases already included in the balance', () => {
+  const purchases = getUnappliedMonthlyCardPurchases(
+    baseCard({ appliedPurchaseKeys: ['sub-1:2026-06'] }),
+    [baseSubscription()],
+    new Date(2026, 5, 1),
+  );
+
+  assert.deepEqual(purchases, []);
+});
+
+test('getUnappliedMonthlyCardPurchases excludes purchases for another card or inactive billing', () => {
+  const purchases = getUnappliedMonthlyCardPurchases(
+    baseCard(),
+    [
+      baseSubscription({ id: 'other-card', cardId: 'card-2' }),
+      baseSubscription({ id: 'paused', status: 'paused' }),
+      baseSubscription({ id: 'manual', autoCreateTransaction: false }),
+    ],
+    new Date(2026, 5, 1),
+  );
+
+  assert.deepEqual(purchases, []);
+});
+
 test('sanitizeCreditCard accepts a valid record', () => {
   const result = sanitizeCreditCard({
     id: 'c',
@@ -72,6 +124,17 @@ test('sanitizeCreditCard accepts a valid record', () => {
   assert.ok(result);
   assert.equal(result.network, 'Amex');
   assert.equal(result.last4, '9999');
+});
+
+test('sanitizeCreditCard preserves valid applied purchase keys', () => {
+  const result = sanitizeCreditCard({
+    id: 'c',
+    name: 'Amex Gold',
+    limit: 5000,
+    balance: 1000,
+    appliedPurchaseKeys: ['sub-1:2026-06', 42, 'sub-2:2026-06'],
+  });
+  assert.deepEqual(result?.appliedPurchaseKeys, ['sub-1:2026-06', 'sub-2:2026-06']);
 });
 
 test('sanitizeCreditCard extracts trailing 4 digits and defaults an unknown network', () => {
