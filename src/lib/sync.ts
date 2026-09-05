@@ -1,3 +1,4 @@
+import type { BankAccount, BankTransaction } from './banking';
 import { db } from './firebase';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import type { Transaction, Subscription, CreditCard, CardTransaction } from '../types';
@@ -8,6 +9,8 @@ export interface BudgetData {
   subscriptions: Subscription[];
   creditCards: CreditCard[];
   cardTransactions: CardTransaction[];
+  bankAccounts?: BankAccount[];
+  bankTransactions?: BankTransaction[];
   updatedAt?: string; // ISO timestamp
 }
 
@@ -30,6 +33,8 @@ export const saveToCloud = async (uid: string, data: BudgetData): Promise<string
     subscriptions: data.subscriptions || [],
     creditCards: data.creditCards || [],
     cardTransactions: data.cardTransactions || [],
+    bankAccounts: data.bankAccounts || [],
+    bankTransactions: data.bankTransactions || [],
     updatedAt: timestamp,
   }));
   await setDoc(docRef, payload);

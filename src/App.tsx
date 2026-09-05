@@ -94,9 +94,12 @@ import {
   type CardTransactionInput,
 } from './lib/creditCards';
 
+import Banking from './Banking';
+import { loadBankAccounts, loadBankTransactions, saveBankAccounts, saveBankTransactions, sanitizeBankAccount, sanitizeBankTransaction, type BankAccount, type BankTransaction } from './lib/banking';
+
 const STORAGE_KEY = 'cyclebudget_data';
 const CATEGORY_STORAGE_KEY = 'cyclebudget_categories';
-type ViewType = 'ledger' | 'dashboard' | 'creditCards' | 'recurring' | 'subscriptions' | 'categories';
+type ViewType = 'banking' | 'ledger' | 'dashboard' | 'creditCards' | 'recurring' | 'subscriptions' | 'categories';
 
 type TrendPoint = {
   name: string;
@@ -313,6 +316,10 @@ export default function App() {
   const [creditCards, setCreditCards] = useState<CreditCard[]>(() => loadCreditCards());
   const [cardTransactions, setCardTransactions] = useState<CardTransaction[]>(() => loadCardTransactions());
 
+  const [bankAccounts, setBankAccounts] = useState<BankAccount[]>(loadBankAccounts);
+  const [bankTransactions, setBankTransactions] = useState<BankTransaction[]>(loadBankTransactions);
+  useEffect(() => { saveBankAccounts(bankAccounts); saveBankTransactions(bankTransactions); }, [bankAccounts, bankTransactions]);
+
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [syncStatus, setSyncStatus] = useState<'offline' | 'synced' | 'syncing' | 'error'>('offline');
   const [showSyncModal, setShowSyncModal] = useState(false);
@@ -367,11 +374,15 @@ export default function App() {
             setSubscriptions(cloudData.subscriptions || []);
             setCreditCards(cloudData.creditCards || []);
             setCardTransactions(cloudData.cardTransactions || []);
+            setBankAccounts(cloudData.bankAccounts || []);
+            setBankTransactions(cloudData.bankTransactions || []);
             localStorage.setItem(STORAGE_KEY, JSON.stringify(cloudData.transactions || []));
             localStorage.setItem(CATEGORY_STORAGE_KEY, JSON.stringify(cloudData.categories || []));
             saveSubscriptions(cloudData.subscriptions || []);
             saveCreditCards(cloudData.creditCards || []);
             saveCardTransactions(cloudData.cardTransactions || []);
+            saveBankAccounts(cloudData.bankAccounts || []);
+            saveBankTransactions(cloudData.bankTransactions || []);
             localStorage.setItem('cyclebudget_last_updated', cloudData.updatedAt);
           }
           // If local is newer: auto-sync will push it once isInitialLoad is false
@@ -415,10 +426,10 @@ export default function App() {
     // Sync to Firebase (debounced)
     saveToCloudDebounced(
       currentUser.uid,
-      { transactions, categories, subscriptions, creditCards, cardTransactions },
+      { transactions, categories, subscriptions, creditCards, cardTransactions, bankAccounts, bankTransactions },
       setSyncStatus
     );
-  }, [transactions, categories, subscriptions, creditCards, cardTransactions, currentUser]);
+  }, [transactions, categories, subscriptions, creditCards, cardTransactions, bankAccounts, bankTransactions, currentUser]);
 
   // Live (non-tombstoned) credit card entities for the dashboard.
   const visibleCreditCards = useMemo(
@@ -898,13 +909,15 @@ export default function App() {
 
   const handleExportJSON = () => {
     const backup = {
-      version: 3,
+      version: 4,
       exportedAt: new Date().toISOString(),
       categories,
       subscriptions,
       transactions,
       creditCards,
       cardTransactions,
+      bankAccounts,
+      bankTransactions,
     };
 
     const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json;charset=utf-8;' });
@@ -933,10 +946,6 @@ export default function App() {
         return;
       }
 
-      if (importedTransactions.length === 0) {
-        alert('The backup file contained no transactions.');
-        return;
-      }
 
       const importedCategories = getCategoriesFromBackup(backup, importedTransactions);
 
@@ -967,8 +976,11 @@ export default function App() {
         if (txn) importedCardTransactions.push(txn);
       }
 
+      const importedBankAccounts = asArray(backup.bankAccounts).map(sanitizeBankAccount).filter((a): a is BankAccount => a !== null);
+      const accountIds = new Set(importedBankAccounts.map(a => a.id));
+      const importedBankTransactions = asArray(backup.bankTransactions).map(sanitizeBankTransaction).filter((t): t is BankTransaction => t !== null && accountIds.has(t.accountId) && (t.type !== 'transfer' || accountIds.has(t.destinationId!)));
       const shouldReplace = confirm(
-        `Import ${importedTransactions.length} transactions, ${importedCategories.length} categories, ${importedSubscriptions.length} subscriptions, and ${importedCreditCards.length} credit cards?\nThis will replace your current saved data.`
+        `Import ${importedTransactions.length} transactions, ${importedCategories.length} categories, ${importedSubscriptions.length} subscriptions, and ${importedCreditCards.length} credit cards, ${importedBankAccounts.length} bank accounts, and ${importedBankTransactions.length} bank transactions?\nThis will replace your current saved data.`
       );
 
       if (shouldReplace) {
@@ -983,6 +995,8 @@ export default function App() {
         setSubscriptions(importedSubscriptions);
         setCreditCards(importedCreditCards);
         setCardTransactions(importedCardTransactions);
+        setBankAccounts(importedBankAccounts);
+        setBankTransactions(importedBankTransactions);
         resetForm();
         // Brief confirmation so the user knows import succeeded
         setTimeout(() =>
@@ -1102,11 +1116,15 @@ export default function App() {
         setSubscriptions(cloudData.subscriptions || []);
         setCreditCards(cloudData.creditCards || []);
         setCardTransactions(cloudData.cardTransactions || []);
+            setBankAccounts(cloudData.bankAccounts || []);
+            setBankTransactions(cloudData.bankTransactions || []);
         localStorage.setItem(STORAGE_KEY, JSON.stringify(cloudData.transactions || []));
         localStorage.setItem(CATEGORY_STORAGE_KEY, JSON.stringify(cloudData.categories || []));
         saveSubscriptions(cloudData.subscriptions || []);
         saveCreditCards(cloudData.creditCards || []);
         saveCardTransactions(cloudData.cardTransactions || []);
+            saveBankAccounts(cloudData.bankAccounts || []);
+            saveBankTransactions(cloudData.bankTransactions || []);
         localStorage.setItem('cyclebudget_last_updated', cloudData.updatedAt);
       } else {
         // Local is newer or no cloud data — upload local budget to this account
@@ -1115,7 +1133,9 @@ export default function App() {
           categories,
           subscriptions,
           creditCards,
-          cardTransactions
+          cardTransactions,
+          bankAccounts,
+          bankTransactions
         });
       }
 
@@ -1160,7 +1180,9 @@ export default function App() {
           categories,
           subscriptions,
           creditCards,
-          cardTransactions
+          cardTransactions,
+          bankAccounts,
+          bankTransactions
         };
         await saveToCloud(currentUser.uid, localData);
         setSyncStatus('synced');
@@ -1184,12 +1206,16 @@ export default function App() {
           setSubscriptions(cloudData.subscriptions || []);
           setCreditCards(cloudData.creditCards || []);
           setCardTransactions(cloudData.cardTransactions || []);
+            setBankAccounts(cloudData.bankAccounts || []);
+            setBankTransactions(cloudData.bankTransactions || []);
           
           localStorage.setItem(STORAGE_KEY, JSON.stringify(cloudData.transactions || []));
           localStorage.setItem(CATEGORY_STORAGE_KEY, JSON.stringify(cloudData.categories || []));
           saveSubscriptions(cloudData.subscriptions || []);
           saveCreditCards(cloudData.creditCards || []);
           saveCardTransactions(cloudData.cardTransactions || []);
+            saveBankAccounts(cloudData.bankAccounts || []);
+            saveBankTransactions(cloudData.bankTransactions || []);
           localStorage.setItem('cyclebudget_last_updated', cloudData.updatedAt || '');
           setSyncStatus('synced');
           alert("✓ Local budget successfully updated with cloud data.");
@@ -1235,6 +1261,7 @@ export default function App() {
                 <LayoutDashboard className="w-3.5 h-3.5" />
                 Dashboard
               </button>
+              <button onClick={() => setActiveView('banking')} className={cn("flex items-center gap-2 px-4 py-1.5 rounded-md text-[11px] font-bold uppercase tracking-wider transition-all", activeView === 'banking' ? "bg-white text-blue-600 shadow-sm" : "text-slate-500 hover:text-slate-900")}><Wallet className="w-3.5 h-3.5" />Banking</button>
               <button
                 onClick={() => setActiveView('creditCards')}
                 className={cn(
@@ -1537,6 +1564,8 @@ export default function App() {
               </div>
             )}
           </div>
+        ) : activeView === 'banking' ? (
+          <Banking accounts={bankAccounts} transactions={bankTransactions} categories={categories} onAccounts={value => { localStorage.setItem('cyclebudget_last_updated', new Date().toISOString()); setBankAccounts(value); }} onTransactions={value => { localStorage.setItem('cyclebudget_last_updated', new Date().toISOString()); setBankTransactions(value); }} />
         ) : activeView === 'creditCards' ? (
           <div className="h-full overflow-y-auto animate-in fade-in duration-500">
             <CreditCardDashboard
