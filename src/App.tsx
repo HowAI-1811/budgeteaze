@@ -87,7 +87,6 @@ import {
   getUtilization,
   getAvailableCredit,
   getDaysUntilDue,
-  getUnappliedMonthlyCardPurchases,
   sanitizeCreditCard,
   sanitizeCardTransaction,
   type CreditCardInput,
@@ -459,14 +458,8 @@ export default function App() {
     setCardTransactions(prev => [...prev, createCardTransaction(input)]);
   };
   // Records a payment: reduces the card balance and logs a negative charge.
-  // Subscriptions charged to this card are already sitting in the ledger
-  // (see the injection effect below), so paying them isn't a new expense.
-  // But a card statement usually also covers other, un-itemized charges
-  // (groceries, gas, one-off purchases) that were never logged individually.
-  // Whatever the payment covers beyond the subscriptions already recorded
-  // this month gets added as one lump-sum ledger expense, so Total Expenses
-  // still reflects real spending instead of silently under-counting it.
-  const logCardPayment = (cardId: string, amount: number, date: string, item?: string) => {
+  // Does not create a ledger transaction — card payments are entered manually in the Ledger.
+  const logCardPayment = (cardId: string, amount: number, date: string) => {
     addCardTransaction({
       cardId,
       description: 'Payment',
@@ -482,35 +475,6 @@ export default function App() {
           : c,
       ),
     );
-
-    const paymentMonth = date.slice(0, 7);
-    // Build the subscription→card map inline so we don't rely on the
-    // subscriptionCardById useMemo, which is declared later in the component
-    // body and would be undefined if referenced via closure here.
-    const subCardMap = new Map<string, string>();
-    subscriptions.forEach(s => {
-      if (!s.cardId) return;
-      const card = creditCards.find(c => c.id === s.cardId);
-      if (card) subCardMap.set(s.id, card.id);
-    });
-    const subscriptionChargesThisMonth = transactions
-      .filter(t => t.date.startsWith(paymentMonth) && t.recurringId && subCardMap.get(t.recurringId) === cardId)
-      .reduce((sum, t) => sum + t.amount, 0);
-    const otherCharges = Math.abs(amount) - subscriptionChargesThisMonth;
-
-    if (otherCharges > 0.005) {
-      const card = creditCards.find(c => c.id === cardId);
-      setTransactions(prev => [...prev, {
-        id: crypto.randomUUID(),
-        description: item || `${card?.name || 'Card'} — other charges`,
-        amount: otherCharges,
-        type: 'debit',
-        date,
-        category: 'Credit Card',
-        paid: true,
-        notes: 'Auto-added from Log Payment — covers charges on this statement not already itemized in the ledger.',
-      }]);
-    }
   };
 
   // Live (non-tombstoned) subscriptions — what every view and the injection
@@ -529,59 +493,10 @@ export default function App() {
     [subscriptions],
   );
 
-  // Card-linked subscriptions are settled when the card's own bill is paid —
-  // they shouldn't surface as separately-payable line items in the ledger.
-  // Maps subscription id -> the CreditCard it's charged to.
-  const subscriptionCardById = useMemo(() => {
-    const map = new Map<string, CreditCard>();
-    subscriptions.forEach(s => {
-      if (!s.cardId) return;
-      const card = creditCards.find(c => c.id === s.cardId);
-      if (card) map.set(s.id, card);
-    });
-    return map;
-  }, [subscriptions, creditCards]);
-
   const activeSubscriptions = useMemo(
     () => visibleSubscriptions.filter(s => s.status === 'active'),
     [visibleSubscriptions],
   );
-
-  // Roll this calendar month's card-linked subscription purchases into each
-  // card's opening balance. Each card stores the applied subscription/month
-  // keys, so refreshes, syncs, and React StrictMode cannot add them twice.
-  const purchaseMonthKey = format(new Date(), 'yyyy-MM');
-  useEffect(() => {
-    const purchaseMonth = parseISO(`${purchaseMonthKey}-01`);
-
-    setCreditCards(prev => {
-      let changed = false;
-      const next = prev.map(card => {
-        if (!isLive(card)) return card;
-
-        const purchases = getUnappliedMonthlyCardPurchases(
-          card,
-          subscriptions,
-          purchaseMonth,
-        );
-        if (purchases.length === 0) return card;
-
-        changed = true;
-        return touchCreditCard(card, {
-          balance: card.balance + purchases.reduce(
-            (sum, purchase) => sum + purchase.subscription.amount,
-            0,
-          ),
-          appliedPurchaseKeys: [
-            ...(card.appliedPurchaseKeys ?? []),
-            ...purchases.map(purchase => purchase.key),
-          ],
-        });
-      });
-
-      return changed ? next : prev;
-    });
-  }, [purchaseMonthKey, subscriptions]);
 
   const subscriptionMonthlyTotal = useMemo(
     () => activeSubscriptions.reduce((sum, s) => sum + getMonthlyEquivalent(s), 0),
@@ -673,10 +588,7 @@ export default function App() {
           category: sub.category,
           isRecurring: true,
           recurringId: sub.id,
-          // Card-linked subscriptions are settled by the card's own bill
-          // payment, not individually — mark them paid on arrival so they
-          // don't nag as an outstanding bill in the ledger.
-          paid: !!sub.cardId,
+          paid: false,
           notes: sub.notes,
         };
       });
@@ -1429,7 +1341,6 @@ export default function App() {
               onTogglePaid={togglePaid}
               comparison={monthComparison}
               subscriptionIds={subscriptionIds}
-              subscriptionCardById={subscriptionCardById}
               headerBg="bg-slate-900"
               headerText="text-white"
             />
@@ -1441,7 +1352,6 @@ export default function App() {
               onTogglePaid={togglePaid}
               comparison={monthComparison}
               subscriptionIds={subscriptionIds}
-              subscriptionCardById={subscriptionCardById}
               headerBg="bg-slate-100"
               headerText="text-slate-900"
               borderLeft
@@ -1570,16 +1480,13 @@ export default function App() {
           <div className="h-full overflow-y-auto animate-in fade-in duration-500">
             <CreditCardDashboard
               cards={visibleCreditCards}
-              subscriptions={visibleSubscriptions}
               cardTransactions={visibleCardTransactions}
               categories={categories}
-              currentDate={currentDate}
               onAddCard={addCreditCard}
               onUpdateCard={updateCreditCard}
               onDeleteCard={deleteCreditCard}
               onAddTransaction={addCardTransaction}
               onLogPayment={logCardPayment}
-              onManageSubscriptions={() => setActiveView('subscriptions')}
               embedded
             />
           </div>
@@ -1670,13 +1577,11 @@ export default function App() {
           <SubscriptionsView
             subscriptions={visibleSubscriptions}
             categories={categories}
-            creditCards={visibleCreditCards}
             currentDate={currentDate}
             onAdd={addSubscription}
             onUpdate={updateSubscription}
             onDelete={deleteSubscription}
             onStatusChange={changeSubscriptionStatus}
-            onManageCards={() => setActiveView('creditCards')}
           />
         ) : (
           <div className="h-full overflow-y-auto p-8 animate-in slide-in-from-right duration-500">
@@ -2027,29 +1932,23 @@ const fmtDate = (iso?: string) => (iso ? format(parseISO(iso), 'MMM d') : '--');
 
 function CreditCardDashboard({
   cards,
-  subscriptions,
   cardTransactions,
   categories,
-  currentDate,
   onAddCard,
   onUpdateCard,
   onDeleteCard,
   onAddTransaction,
   onLogPayment,
-  onManageSubscriptions,
   embedded = false,
 }: {
   cards: CreditCard[];
-  subscriptions: Subscription[];
   cardTransactions: CardTransaction[];
   categories: string[];
-  currentDate: Date;
   onAddCard: (input: CreditCardInput) => void;
   onUpdateCard: (id: string, changes: Partial<CreditCard>) => void;
   onDeleteCard: (id: string) => void;
   onAddTransaction: (input: CardTransactionInput) => void;
-  onLogPayment: (cardId: string, amount: number, date: string, item?: string) => void;
-  onManageSubscriptions: () => void;
+  onLogPayment: (cardId: string, amount: number, date: string) => void;
   embedded?: boolean;
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(cards[0]?.id ?? null);
@@ -2062,7 +1961,7 @@ function CreditCardDashboard({
 
   const today = format(new Date(), 'yyyy-MM-dd');
   const [chargeForm, setChargeForm] = useState({ description: '', amount: '', date: today, category: '', posted: true });
-  const [paymentForm, setPaymentForm] = useState({ amount: '', date: today, item: '' });
+  const [paymentForm, setPaymentForm] = useState({ amount: '', date: today });
 
   const selected = cards.find(c => c.id === selectedId) ?? cards[0] ?? null;
 
@@ -2141,8 +2040,8 @@ function CreditCardDashboard({
     if (!selected) return;
     const amount = parseFloat(paymentForm.amount);
     if (!Number.isFinite(amount) || amount <= 0) return;
-    onLogPayment(selected.id, amount, paymentForm.date, paymentForm.item.trim() || undefined);
-    setPaymentForm({ amount: '', date: today, item: '' });
+    onLogPayment(selected.id, amount, paymentForm.date);
+    setPaymentForm({ amount: '', date: today });
     setShowPaymentModal(false);
   };
 
@@ -2153,11 +2052,6 @@ function CreditCardDashboard({
     }
     setBalanceDraft(null);
   };
-
-  const subsForCard = selected
-    ? subscriptions.filter(s => s.cardId === selected.id && s.status === 'active')
-    : [];
-  const subsTotal = subsForCard.reduce((sum, s) => sum + getMonthlyEquivalent(s), 0);
 
   const cycleCharges = selected
     ? cardTransactions
@@ -2178,14 +2072,8 @@ function CreditCardDashboard({
         <div className="flex items-end justify-between gap-6">
           <div>
             <h2 className="font-serif italic text-3xl tracking-tight text-slate-900 border-b-2 border-blue-600 inline-block mb-1">Card Dashboard</h2>
-            <p className="text-xs text-slate-500 font-medium">Track what's on each card — balance, subscriptions, and charges.</p>
+            <p className="text-xs text-slate-500 font-medium">Track what's on each card — balance, limits, and charges.</p>
           </div>
-          <button
-            onClick={onManageSubscriptions}
-            className="text-[11px] uppercase tracking-widest font-bold text-blue-600 hover:text-blue-800 transition-colors"
-          >
-            Manage Subscriptions →
-          </button>
         </div>
 
         {/* Selector pills */}
@@ -2235,7 +2123,7 @@ function CreditCardDashboard({
                   </button>
                   <button
                     onClick={() => {
-                      if (confirm(`Delete card "${selected.name}"? Its subscriptions and charges will remain but become unlinked.`)) {
+                      if (confirm(`Delete card "${selected.name}"?`)) {
                         onDeleteCard(selected.id);
                         setSelectedId(null);
                       }
@@ -2273,7 +2161,7 @@ function CreditCardDashboard({
                 </span>
               </div>
               <button
-                onClick={() => { setPaymentForm({ amount: selected.minDue ? String(selected.minDue) : '', date: today, item: '' }); setShowPaymentModal(true); }}
+                onClick={() => { setPaymentForm({ amount: selected.minDue ? String(selected.minDue) : '', date: today }); setShowPaymentModal(true); }}
                 className="flex items-center gap-1.5 rounded bg-slate-900 px-3 py-1.5 text-[10px] uppercase tracking-widest font-bold text-white hover:bg-slate-800 transition-colors"
               >
                 <Wallet className="w-3 h-3" /> Log Payment
@@ -2331,48 +2219,6 @@ function CreditCardDashboard({
                 />
               </div>
               <p className="text-[10px] text-slate-400 mt-1.5 font-mono">Limit ${formatMoney(selected.limit)}</p>
-            </div>
-
-            {/* Subscriptions this cycle */}
-            <div className="border border-slate-200 bg-white rounded-lg shadow-sm overflow-hidden">
-              <div className="flex justify-between items-center px-4 py-3 border-b border-slate-100">
-                <h3 className="text-[10px] uppercase font-bold tracking-widest text-slate-500">Subscriptions This Cycle</h3>
-                <span className="font-mono text-xs font-bold text-violet-600">${formatMoney(subsTotal)}/mo</span>
-              </div>
-              {subsForCard.length === 0 ? (
-                <p className="p-6 text-center text-xs text-slate-400 italic font-serif">
-                  No active subscriptions on this card. <button onClick={onManageSubscriptions} className="text-blue-600 not-italic font-bold hover:underline">Add one →</button>
-                </p>
-              ) : (
-                <ul className="divide-y divide-slate-100">
-                  {subsForCard.map(sub => {
-                    const billsThisMonth = subscriptionBillsInMonth(sub, currentDate);
-                    const posted = billsThisMonth && currentDate.getDate() >= Math.min(sub.billingDay, 28);
-                    const statusLabel = !billsThisMonth ? 'Not this cycle' : posted ? 'Posted' : 'Upcoming';
-                    return (
-                      <li key={sub.id} className="flex items-center justify-between px-4 py-3">
-                        <div className="flex items-center gap-2">
-                          <span className="font-sans font-bold text-slate-900 text-xs">{sub.name}</span>
-                          <span className={cn(
-                            'inline-flex items-center rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider',
-                            !billsThisMonth
-                              ? 'border-slate-100 bg-slate-50 text-slate-400'
-                              : posted
-                                ? 'border-slate-200 bg-slate-50 text-slate-500'
-                                : 'border-blue-200 bg-blue-50 text-blue-700'
-                          )}>
-                            {statusLabel}
-                          </span>
-                        </div>
-                        <div className="text-right">
-                          <span className="font-mono text-xs font-bold text-slate-900">${formatMoney(sub.amount)}</span>
-                          <span className="font-mono text-[10px] text-slate-400 ml-2">day {sub.billingDay}</span>
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
             </div>
 
             {/* Ad hoc charges */}
@@ -2525,7 +2371,7 @@ function CreditCardDashboard({
               <h3 className="text-xs uppercase font-bold tracking-widest text-slate-500">Log Payment · {selected.name}</h3>
               <button onClick={() => setShowPaymentModal(false)} className="text-slate-400 hover:text-slate-700"><X className="w-4 h-4" /></button>
             </div>
-            <p className="text-[11px] text-slate-500">Reduces this card's balance. Any subscriptions already in the ledger this month are covered — the rest of the payment is logged as one expense.</p>
+            <p className="text-[11px] text-slate-500">Reduces this card's balance. Enter your bill payment in the Split-Cycle Ledger separately.</p>
             <div className="grid grid-cols-2 gap-4">
               <label className="flex flex-col gap-1">
                 <span className={labelClass}>Amount *</span>
@@ -2536,11 +2382,6 @@ function CreditCardDashboard({
                 <input type="date" value={paymentForm.date} onChange={e => setPaymentForm(p => ({ ...p, date: e.target.value }))} className={inputClass} />
               </label>
             </div>
-            <label className="flex flex-col gap-1">
-              <span className={labelClass}>Item (optional)</span>
-              <input type="text" value={paymentForm.item} onChange={e => setPaymentForm(p => ({ ...p, item: e.target.value }))} className={inputClass} placeholder="e.g. Costco, gas, dining" />
-              <span className="text-[10px] text-slate-400">Labels the leftover charges beyond your linked subscriptions.</span>
-            </label>
             <div className="flex gap-3 pt-2">
               <button onClick={submitPayment} className="px-5 bg-slate-900 text-white text-[11px] uppercase tracking-widest font-bold py-2.5 hover:bg-slate-800 rounded transition-colors">Log Payment</button>
               <button onClick={() => setShowPaymentModal(false)} className="px-5 border border-slate-200 text-slate-600 text-[11px] uppercase tracking-widest font-bold py-2.5 hover:bg-slate-50 rounded transition-colors">Cancel</button>
@@ -2560,7 +2401,6 @@ function CyclePane({
   onTogglePaid,
   comparison,
   subscriptionIds,
-  subscriptionCardById,
   headerBg,
   headerText,
   borderLeft = false
@@ -2572,7 +2412,6 @@ function CyclePane({
   onTogglePaid: (id: string) => void;
   comparison: MonthComparison;
   subscriptionIds: Set<string>;
-  subscriptionCardById: Map<string, CreditCard>;
   headerBg: string;
   headerText: string;
   borderLeft?: boolean;
@@ -2648,30 +2487,20 @@ function CyclePane({
                       </td>
                       <td className="p-3 border-r border-slate-100">
                         {t.type === 'debit' ? (
-                          t.recurringId && subscriptionCardById.has(t.recurringId) ? (
-                            <span
-                              className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50 px-2 py-1 text-[9px] font-bold uppercase tracking-wider text-slate-500"
-                              title="Settled when you pay this card's bill — not paid individually"
-                            >
-                              <CreditCardIcon className="w-3 h-3" />
-                              {subscriptionCardById.get(t.recurringId)!.name}
-                            </span>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() => onTogglePaid(t.id)}
-                              className={cn(
-                                "inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-[9px] font-bold uppercase tracking-wider transition-all",
-                                t.paid
-                                  ? "border-emerald-200 bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
-                                  : "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100"
-                              )}
-                              title={t.paid ? "Mark this bill unpaid" : "Mark this bill paid"}
-                            >
-                              {t.paid ? <CheckCircle2 className="w-3 h-3" /> : <Circle className="w-3 h-3" />}
-                              {t.paid ? 'Paid' : 'Unpaid'}
-                            </button>
-                          )
+                          <button
+                            type="button"
+                            onClick={() => onTogglePaid(t.id)}
+                            className={cn(
+                              "inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-[9px] font-bold uppercase tracking-wider transition-all",
+                              t.paid
+                                ? "border-emerald-200 bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
+                                : "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100"
+                            )}
+                            title={t.paid ? "Mark this bill unpaid" : "Mark this bill paid"}
+                          >
+                            {t.paid ? <CheckCircle2 className="w-3 h-3" /> : <Circle className="w-3 h-3" />}
+                            {t.paid ? 'Paid' : 'Unpaid'}
+                          </button>
                         ) : (
                           <span className="inline-flex items-center rounded-full border border-emerald-100 bg-emerald-50 px-2 py-1 text-[9px] font-bold uppercase tracking-wider text-emerald-700">
                             Income
@@ -2765,7 +2594,6 @@ type SubscriptionFormState = {
   renewalDate: string;
   trialEndDate: string;
   autoCreateTransaction: boolean;
-  cardId: string;
   url: string;
   notes: string;
   color: string;
@@ -2782,7 +2610,6 @@ const emptySubscriptionForm = (): SubscriptionFormState => ({
   renewalDate: '',
   trialEndDate: '',
   autoCreateTransaction: true,
-  cardId: '',
   url: '',
   notes: '',
   color: SUBSCRIPTION_COLORS[0],
@@ -2791,23 +2618,19 @@ const emptySubscriptionForm = (): SubscriptionFormState => ({
 function SubscriptionsView({
   subscriptions,
   categories,
-  creditCards,
   currentDate,
   onAdd,
   onUpdate,
   onDelete,
   onStatusChange,
-  onManageCards,
 }: {
   subscriptions: Subscription[];
   categories: string[];
-  creditCards: CreditCard[];
   currentDate: Date;
   onAdd: (input: SubscriptionInput) => void;
   onUpdate: (id: string, changes: Partial<Subscription>) => void;
   onDelete: (id: string, deleteTransactions?: boolean) => void;
   onStatusChange: (id: string, status: SubscriptionStatus) => void;
-  onManageCards: () => void;
 }) {
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -2835,7 +2658,6 @@ function SubscriptionsView({
       renewalDate: sub.renewalDate ? sub.renewalDate.slice(0, 10) : '',
       trialEndDate: sub.trialEndDate ? sub.trialEndDate.slice(0, 10) : '',
       autoCreateTransaction: sub.autoCreateTransaction,
-      cardId: sub.cardId || '',
       url: sub.url || '',
       notes: sub.notes || '',
       color: sub.color || SUBSCRIPTION_COLORS[0],
@@ -2861,7 +2683,6 @@ function SubscriptionsView({
       renewalDate: form.renewalDate || undefined,
       trialEndDate: form.trialEndDate || undefined,
       autoCreateTransaction: form.autoCreateTransaction,
-      cardId: form.cardId || undefined,
       url: form.url.trim() || undefined,
       notes: form.notes.trim() || undefined,
       color: form.color,
@@ -2934,7 +2755,6 @@ function SubscriptionsView({
             <thead className="bg-slate-50 border-b border-slate-200">
               <tr className="text-left text-[10px] uppercase tracking-widest font-bold text-slate-500">
                 <th className="p-4">Service</th>
-                <th className="p-4">Card</th>
                 <th className="p-4">Category</th>
                 <th className="p-4 text-right">Amount</th>
                 <th className="p-4">Cycle</th>
@@ -2947,7 +2767,7 @@ function SubscriptionsView({
             <tbody className="text-xs">
               {subscriptions.length === 0 && (
                 <tr>
-                  <td colSpan={9} className="p-12 text-center text-slate-400 italic font-serif">
+                  <td colSpan={8} className="p-12 text-center text-slate-400 italic font-serif">
                     No subscriptions yet. Add one to start tracking recurring spend.
                   </td>
                 </tr>
@@ -2956,7 +2776,6 @@ function SubscriptionsView({
                 .sort((a, b) => getMonthlyEquivalent(b) - getMonthlyEquivalent(a))
                 .map(sub => {
                   const isTrial = !!sub.trialEndDate && parseISO(sub.trialEndDate) > today;
-                  const linkedCard = sub.cardId ? creditCards.find(c => c.id === sub.cardId) : null;
                   return (
                     <tr key={sub.id} className="border-b border-slate-100 hover:bg-slate-50 transition-colors">
                       <td className="p-4">
@@ -2972,16 +2791,6 @@ function SubscriptionsView({
                             <span className="inline-flex items-center rounded-full border border-cyan-200 bg-cyan-50 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-cyan-700">Trial</span>
                           )}
                         </div>
-                      </td>
-                      <td className="p-4 font-sans text-xs">
-                        {linkedCard ? (
-                          <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 font-bold text-slate-700">
-                            <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: linkedCard.color || '#334155' }} />
-                            {linkedCard.name}{linkedCard.last4 ? ` ••${linkedCard.last4}` : ''}
-                          </span>
-                        ) : (
-                          <span className="text-slate-300">--</span>
-                        )}
                       </td>
                       <td className="p-4 font-sans text-slate-500">{sub.category || '--'}</td>
                       <td className="p-4 text-right font-mono">
@@ -3083,25 +2892,6 @@ function SubscriptionsView({
                 </select>
               </label>
               <label className="flex flex-col gap-1">
-                <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500">Card</span>
-                {creditCards.length === 0 ? (
-                  <button
-                    type="button"
-                    onClick={onManageCards}
-                    className="border border-dashed border-slate-300 p-2 text-xs rounded text-left text-blue-600 hover:bg-blue-50 transition-colors"
-                  >
-                    Add a credit card first →
-                  </button>
-                ) : (
-                  <select value={form.cardId} onChange={e => setField('cardId', e.target.value)} className="border border-slate-200 p-2 text-xs rounded outline-none focus:bg-blue-50 focus:border-blue-500">
-                    <option value="">Not on a tracked card</option>
-                    {creditCards.map(c => (
-                      <option key={c.id} value={c.id}>{c.name}{c.last4 ? ` ••${c.last4}` : ''}</option>
-                    ))}
-                  </select>
-                )}
-              </label>
-              <label className="flex flex-col gap-1">
                 <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500">Status</span>
                 <select value={form.status} onChange={e => setField('status', e.target.value as SubscriptionStatus)} className="border border-slate-200 p-2 text-xs rounded outline-none focus:bg-blue-50 focus:border-blue-500">
                   <option value="active">Active</option>
@@ -3160,13 +2950,6 @@ function SubscriptionsView({
 
             {form.billingDay && parseInt(form.billingDay, 10) > 28 && (
               <p className="text-[10px] text-amber-600 font-semibold">Days 29–31 aren't supported — use 28 to approximate month-end billing.</p>
-            )}
-
-            {form.cardId && (
-              <p className="text-[10px] text-slate-500 font-semibold">
-                This subscription will still appear in your ledger's Bills area as a "Charged to [Card]" badge — that's expected, it's already settled by the card's payment, not a separate bill to pay. If you'd
-                <em> also</em> entered this same bill by hand as a plain recurring transaction before linking it here, delete that duplicate — otherwise it'll double-count toward your monthly totals.
-              </p>
             )}
 
             <div className="flex gap-3 pt-2">

@@ -200,7 +200,6 @@ export const sanitizeSubscription = (value: unknown): Subscription | null => {
       typeof s.autoCreateTransaction === 'boolean'
         ? s.autoCreateTransaction
         : true,
-    cardId: isString(s.cardId) ? s.cardId : undefined,
     url: isString(s.url) ? s.url : undefined,
     notes: isString(s.notes) ? s.notes : undefined,
     color: isString(s.color) ? s.color : undefined,

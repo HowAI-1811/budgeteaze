@@ -57,9 +57,6 @@ export interface Subscription extends SyncMeta {
   // Ledger integration
   autoCreateTransaction: boolean; // true → inject a Transaction each billing period
 
-  // Credit card linkage
-  cardId?: string; // FK → CreditCard.id; absent means not charged to a tracked card
-
   // Optional metadata
   url?: string; // management/cancellation URL
   notes?: string;
@@ -71,7 +68,7 @@ export type CardNetwork = 'Visa' | 'Mastercard' | 'Amex' | 'Discover' | 'Other';
 /**
  * A tracked credit card. Distinct from the bill-pay `Transaction`s in the
  * ledger (those record the monthly external payment). A `CreditCard` models what
- * is *on* the card — its balance, limit, and the charges/subscriptions against
+ * is *on* the card — its balance, limit, and the charges against
  * it. `balance` is manually maintained for now (see spec §8).
  */
 export interface CreditCard extends SyncMeta {
@@ -86,8 +83,6 @@ export interface CreditCard extends SyncMeta {
   stmtCloseDate: string; // ISO date string
   apr?: number;
   color?: string; // optional hex for card visual
-  /** Subscription charge keys already rolled into `balance` (subscriptionId:yyyy-MM). */
-  appliedPurchaseKeys?: string[];
 }
 
 /** An ad hoc charge (or payment) recorded against a tracked card. */
